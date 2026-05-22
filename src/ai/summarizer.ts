@@ -92,13 +92,18 @@ async function summarizeCommitsSinceLast(
   }
 
   const target = opts.tag.replace(/^v/, '')
+  const targetIsFinal = !target.includes('-')
   const normalized = tags
     .map((t) => ({ raw: t, normalized: t.replace(/^v/, '') }))
     .filter((t) => t.normalized !== target)
 
-  // Anything semantically less than the target
+  // For final releases (3.2.0), compare against the previous stable —
+  // operators want "since the last release I'm running", not "since last RC".
+  // For prereleases (betas/RCs), the closest semver predecessor is the right
+  // delta — it's the tight iteration loop testers care about.
   const predecessors = normalized
     .filter((t) => compareVersions(t.normalized, target) < 0)
+    .filter((t) => (targetIsFinal ? !t.normalized.includes('-') : true))
     .sort((a, b) => compareVersions(a.normalized, b.normalized))
 
   const prior = predecessors.at(-1)
@@ -187,7 +192,7 @@ async function summarizeCommits(
       input_tokens: response.usage.input_tokens,
       output_tokens: response.usage.output_tokens,
     })
-    return `_Preliminary signal from commits since ${baseTag} (no GitHub Release published yet):_\n${text}`
+    return `**Preliminary changes since \`${baseTag}\`** _(no GitHub Release published yet — summarized from raw commits)_:\n${text}`
   } catch (err) {
     logger?.warn('Claude commit summarization failed', {
       tag,
@@ -231,7 +236,7 @@ export async function summarizeBody(
       input_tokens: response.usage.input_tokens,
       output_tokens: response.usage.output_tokens,
     })
-    return text
+    return `**What's in this release:**\n${text}`
   } catch (err) {
     logger?.warn('Claude summarization failed', {
       tag,

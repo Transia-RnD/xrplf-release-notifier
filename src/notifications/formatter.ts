@@ -36,7 +36,7 @@ export function formatMessages(
   if (summary && msgs.mattermost.attachments?.[0]) {
     const att = msgs.mattermost.attachments[0]
     const existing = att.text ? `${att.text}\n\n` : ''
-    att.text = `${existing}**What's in this release:**\n${summary}`
+    att.text = `${existing}${summary}`
   }
 
   return msgs
@@ -63,13 +63,13 @@ function formatWebhookMessages(version: VersionInfo): FormattedMessages {
     case VersionType.BETA:
       return {
         mattermost: envelope({
-          fallback: `rippled ${version.raw} (beta) tagged on ${version.branch}`,
+          fallback: `rippled ${version.raw} (beta) version bumped on ${version.branch}`,
           color: COLOR_BETA,
-          pretext: `:test_tube: rippled \`${version.raw}\` (beta) has been tagged on \`${version.branch}\`.`,
+          pretext: `:test_tube: rippled \`${version.raw}\` (beta) version bumped on \`${version.branch}\`.`,
           title: 'View commit',
           title_link: version.commitUrl,
         }),
-        twitter: `rippled ${version.raw} (beta) has been tagged on the ${version.branch} branch. #XRPLedger #rippled`,
+        twitter: `rippled ${version.raw} (beta) version bumped on the ${version.branch} branch. #XRPLedger #rippled`,
       }
     case VersionType.RC:
       return {
@@ -86,14 +86,14 @@ function formatWebhookMessages(version: VersionInfo): FormattedMessages {
     case VersionType.FINAL:
       return {
         mattermost: envelope({
-          fallback: `rippled ${version.raw} officially released on ${version.branch}`,
+          fallback: `rippled ${version.raw} version finalized on ${version.branch}`,
           color: COLOR_FINAL,
-          pretext: `:tada: rippled \`${version.raw}\` has been officially released on \`${version.branch}\`!`,
-          text: 'Operators should upgrade as soon as possible.',
+          pretext: `:tada: rippled \`${version.raw}\` version finalized on \`${version.branch}\` — release expected soon.`,
+          text: 'A GitHub Release and binary packages will follow.',
           title: 'View commit',
           title_link: version.commitUrl,
         }),
-        twitter: `rippled ${version.raw} has been officially released! Node operators should upgrade. #XRPLedger #rippled`,
+        twitter: `rippled ${version.raw} version finalized on the ${version.branch} branch — release expected soon. #XRPLedger #rippled`,
       }
   }
 }
@@ -121,11 +121,10 @@ function formatTagMessages(version: VersionInfo): FormattedMessages {
       fallback: `rippled ${version.raw} tag pushed`,
       color: COLOR_TAG,
       pretext: `:label: rippled \`${version.raw}\` tag has been pushed to \`XRPLF/rippled\`.`,
-      text: 'This marks the canonical release point.',
       title: 'View commit',
       title_link: version.commitUrl,
     }),
-    twitter: `rippled ${version.raw} has been tagged on XRPLF/rippled — canonical release point. #XRPLedger #rippled`,
+    twitter: `rippled ${version.raw} has been tagged on XRPLF/rippled. #XRPLedger #rippled`,
   }
 }
 

@@ -67,10 +67,10 @@ describe('formatMessages (webhook)', () => {
     const msgs = formatMessages(version)
     const mm = mmText(msgs)
     expect(mm).toContain(':tada:')
-    expect(mm).toContain('officially released')
-    expect(mm).toContain('upgrade')
+    expect(mm).toContain('finalized')
+    expect(mm).toContain('release expected')
     expect(msgs.mattermost.attachments?.[0]?.color).toBe('#4CAF50')
-    expect(msgs.twitter).toContain('officially released')
+    expect(msgs.twitter).toContain('finalized')
   })
 
   it('keeps twitter messages under 280 characters', () => {
