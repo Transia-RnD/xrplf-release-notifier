@@ -1,9 +1,9 @@
 import fs from 'fs'
 import path from 'path'
+import type { PollerState } from '../../../src/poller/binary-checker'
 import {
   parseVersionsFromHtml,
   detectNewVersions,
-  PollerState,
 } from '../../../src/poller/binary-checker'
 
 const DEB_REGEX =
@@ -63,44 +63,29 @@ describe('detectNewVersions', () => {
   }
 
   it('detects a new deb version', () => {
-    const result = detectNewVersions(
-      { deb: '3.1.3', rpm: '3.1.0' },
-      baseState
-    )
+    const result = detectNewVersions({ deb: '3.1.3', rpm: '3.1.0' }, baseState)
     expect(result).toBe('3.1.3')
   })
 
   it('detects a new rpm version', () => {
-    const result = detectNewVersions(
-      { deb: '3.1.0', rpm: '3.1.3' },
-      baseState
-    )
+    const result = detectNewVersions({ deb: '3.1.0', rpm: '3.1.3' }, baseState)
     expect(result).toBe('3.1.3')
   })
 
   it('returns null when nothing changed', () => {
-    const result = detectNewVersions(
-      { deb: '3.1.0', rpm: '3.1.0' },
-      baseState
-    )
+    const result = detectNewVersions({ deb: '3.1.0', rpm: '3.1.0' }, baseState)
     expect(result).toBeNull()
   })
 
   it('handles empty initial state', () => {
     const emptyState: PollerState = { deb: null, rpm: null }
-    const result = detectNewVersions(
-      { deb: '3.1.3', rpm: null },
-      emptyState
-    )
+    const result = detectNewVersions({ deb: '3.1.3', rpm: null }, emptyState)
     expect(result).toBe('3.1.3')
   })
 
   it('prefers deb over rpm when both are new', () => {
     const emptyState: PollerState = { deb: null, rpm: null }
-    const result = detectNewVersions(
-      { deb: '3.1.3', rpm: '3.1.3' },
-      emptyState
-    )
+    const result = detectNewVersions({ deb: '3.1.3', rpm: '3.1.3' }, emptyState)
     expect(result).toBe('3.1.3')
   })
 

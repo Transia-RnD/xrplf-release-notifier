@@ -13,13 +13,11 @@
 import 'dotenv/config'
 import axios from 'axios'
 import winston from 'winston'
-import { summarizeReleaseByTag, Summaries } from '../src/ai/summarizer'
+import type { Summaries } from '../src/ai/summarizer'
+import { summarizeReleaseByTag } from '../src/ai/summarizer'
 import { formatMessages } from '../src/notifications/formatter'
-import {
-  VersionInfo,
-  NotificationSource,
-  VersionType,
-} from '../src/version/types'
+import type { VersionInfo } from '../src/version/types'
+import { NotificationSource, VersionType } from '../src/version/types'
 import { classifyVersion } from '../src/version/parser'
 
 const OWNER = 'XRPLF'
@@ -32,7 +30,7 @@ const tagArg = args.find((a) => !a.startsWith('--'))
 async function pickTag(): Promise<string> {
   if (tagArg) return tagArg
   // Default: latest beta tag
-  const res = await axios.get<Array<{ name: string }>>(
+  const res = await axios.get<{ name: string }[]>(
     `https://api.github.com/repos/${OWNER}/${REPO}/tags?per_page=20`,
     { headers: { 'User-Agent': 'xrplf-release-notifier-dry-run' } }
   )
@@ -47,35 +45,59 @@ interface ScenarioRender {
   versionInfo: VersionInfo
 }
 
-function buildScenarios(version: ReturnType<typeof classifyVersion>): ScenarioRender[] {
+function buildScenarios(
+  version: ReturnType<typeof classifyVersion>
+): ScenarioRender[] {
   const tag = version.raw
   const commitUrl = `https://github.com/${OWNER}/${REPO}/commit/example`
   const releaseUrl = `https://github.com/${OWNER}/${REPO}/releases/tag/${tag}`
 
   // Pick the "BuildInfo bump" scenario by version type
   const sourceBumpBranch =
-    version.type === VersionType.BETA ? 'develop' : `release-${version.major}.${version.minor}`
+    version.type === VersionType.BETA
+      ? 'develop'
+      : `release-${version.major}.${version.minor}`
 
   return [
     {
       scenario: `Source bump (${version.type}) — push to ${sourceBumpBranch} modifying BuildInfo.cpp`,
       source: NotificationSource.WEBHOOK,
-      versionInfo: { ...version, branch: sourceBumpBranch, commitSha: 'example', commitUrl },
+      versionInfo: {
+        ...version,
+        branch: sourceBumpBranch,
+        commitSha: 'example',
+        commitUrl,
+      },
     },
     {
       scenario: `Tag push — refs/tags/${tag} pushed`,
       source: NotificationSource.TAG,
-      versionInfo: { ...version, branch: `tag:${tag}`, commitSha: 'example', commitUrl },
+      versionInfo: {
+        ...version,
+        branch: `tag:${tag}`,
+        commitSha: 'example',
+        commitUrl,
+      },
     },
     {
       scenario: `Release published — GitHub Release for ${tag} (action=published)`,
       source: NotificationSource.RELEASE,
-      versionInfo: { ...version, branch: `release:${tag}`, commitSha: '', commitUrl: releaseUrl },
+      versionInfo: {
+        ...version,
+        branch: `release:${tag}`,
+        commitSha: '',
+        commitUrl: releaseUrl,
+      },
     },
     {
       scenario: `Binary poll — new .deb/.rpm for ${tag} on repos.ripple.com`,
       source: NotificationSource.BINARY_POLL,
-      versionInfo: { ...version, branch: 'release', commitSha: '', commitUrl: '' },
+      versionInfo: {
+        ...version,
+        branch: 'release',
+        commitSha: '',
+        commitUrl: '',
+      },
     },
   ]
 }
@@ -112,11 +134,15 @@ function printHuman(rendered: ReturnType<typeof renderScenario>[]) {
     console.log(`  Color:   ${r.mattermost.color}`)
     console.log(`  Pretext: ${r.mattermost.pretext}`)
     if (r.mattermost.title) {
-      console.log(`  Button:  ${r.mattermost.title}  →  ${r.mattermost.title_link}`)
+      console.log(
+        `  Button:  ${r.mattermost.title}  →  ${r.mattermost.title_link}`
+      )
     }
     if (r.mattermost.text) {
       console.log('  Body:')
-      r.mattermost.text.split('\n').forEach((line) => console.log(`    ${line}`))
+      r.mattermost.text
+        .split('\n')
+        .forEach((line) => console.log(`    ${line}`))
     }
     console.log(`  Footer:  ${r.mattermost.footer}`)
     console.log()
@@ -131,20 +157,28 @@ async function main() {
   const logger = winston.createLogger({
     level: jsonMode ? 'error' : 'info',
     format: winston.format.simple(),
-    transports: [new winston.transports.Console({ stderrLevels: ['error', 'warn', 'info', 'debug'] })],
+    transports: [
+      new winston.transports.Console({
+        stderrLevels: ['error', 'warn', 'info', 'debug'],
+      }),
+    ],
   })
 
   const tag = await pickTag()
   if (!jsonMode) {
     console.log(`\nDry-run for rippled ${tag}`)
-    console.log(`Source: ${process.env.ANTHROPIC_API_KEY ? 'AI summaries enabled (Haiku 4.5)' : 'NO ANTHROPIC_API_KEY — summaries will be null'}`)
+    console.log(
+      `Source: ${process.env.ANTHROPIC_API_KEY ? 'AI summaries enabled (Haiku 4.5)' : 'NO ANTHROPIC_API_KEY — summaries will be null'}`
+    )
   }
 
   let version: ReturnType<typeof classifyVersion>
   try {
     version = classifyVersion(tag)
   } catch (err) {
-    console.error(`Tag "${tag}" doesn't match the version pattern (X.Y.Z[-bN|-rcN]).`)
+    console.error(
+      `Tag "${tag}" doesn't match the version pattern (X.Y.Z[-bN|-rcN]).`
+    )
     process.exit(1)
   }
 
@@ -161,12 +195,18 @@ async function main() {
   const rendered = scenarios.map((s) => renderScenario(s, summaries))
 
   if (jsonMode) {
-    console.log(JSON.stringify({ tag, summaries, scenarios: rendered }, null, 2))
+    console.log(
+      JSON.stringify({ tag, summaries, scenarios: rendered }, null, 2)
+    )
   } else {
     printHuman(rendered)
     console.log('\n' + '═'.repeat(80))
-    console.log('  Nothing was posted. To iterate, edit prompts in src/ai/summarizer.ts')
-    console.log('  and rerun: npm run build && npx ts-node scripts/dry-run.ts ' + tag)
+    console.log(
+      '  Nothing was posted. To iterate, edit prompts in src/ai/summarizer.ts'
+    )
+    console.log(
+      '  and rerun: npm run build && npx ts-node scripts/dry-run.ts ' + tag
+    )
     console.log('═'.repeat(80) + '\n')
   }
 }

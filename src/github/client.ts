@@ -49,10 +49,8 @@ export async function listVersionTags(
 ): Promise<string[]> {
   const url = `${GITHUB_API}/repos/${owner}/${repo}/tags?per_page=100`
   const headers = buildHeaders('application/vnd.github+json', token)
-  const res = await axios.get<Array<{ name: string }>>(url, { headers })
-  return res.data
-    .map((t) => t.name)
-    .filter((n) => VERSION_TAG.test(n))
+  const res = await axios.get<{ name: string }[]>(url, { headers })
+  return res.data.map((t) => t.name).filter((n) => VERSION_TAG.test(n))
 }
 
 export interface CommitSummary {
@@ -72,10 +70,10 @@ export async function compareCommits(
   const headers = buildHeaders('application/vnd.github+json', token)
   try {
     const res = await axios.get<{
-      commits: Array<{
+      commits: {
         sha: string
         commit: { message: string; author?: { name?: string } }
-      }>
+      }[]
     }>(url, { headers })
     return res.data.commits.map((c) => ({
       sha: c.sha,

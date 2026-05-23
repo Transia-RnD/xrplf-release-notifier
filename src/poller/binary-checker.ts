@@ -1,22 +1,19 @@
 import axios from 'axios'
 
-const DEB_URL =
-  'https://repos.ripple.com/repos/rippled-deb/pool/stable/'
-const RPM_URL =
-  'https://repos.ripple.com/repos/rippled-rpm/stable/'
+const DEB_URL = 'https://repos.ripple.com/repos/rippled-deb/pool/stable/'
+const RPM_URL = 'https://repos.ripple.com/repos/rippled-rpm/stable/'
 
-const DEB_REGEX = /href="rippled_(\d+\.\d+\.\d+(?:-[a-z0-9]+)?)-\d+_amd64\.deb"/g
-const RPM_REGEX = /href="rippled-(\d+\.\d+\.\d+(?:-[a-z0-9]+)?)-\d+\.\w+\.x86_64\.rpm"/g
+const DEB_REGEX =
+  /href="rippled_(\d+\.\d+\.\d+(?:-[a-z0-9]+)?)-\d+_amd64\.deb"/g
+const RPM_REGEX =
+  /href="rippled-(\d+\.\d+\.\d+(?:-[a-z0-9]+)?)-\d+\.\w+\.x86_64\.rpm"/g
 
 export interface PollerState {
   deb: { version: string; detectedAt: string } | null
   rpm: { version: string; detectedAt: string } | null
 }
 
-export function parseVersionsFromHtml(
-  html: string,
-  regex: RegExp
-): string[] {
+export function parseVersionsFromHtml(html: string, regex: RegExp): string[] {
   const versions: string[] = []
   let match: RegExpExecArray | null
   const re = new RegExp(regex.source, regex.flags)

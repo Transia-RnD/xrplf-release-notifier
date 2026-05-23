@@ -1,8 +1,6 @@
 import { TwitterApi } from 'twitter-api-v2'
-import {
-  postToTwitter,
-  TwitterCredentials,
-} from '../../../src/notifications/twitter'
+import type { TwitterCredentials } from '../../../src/notifications/twitter'
+import { postToTwitter } from '../../../src/notifications/twitter'
 
 jest.mock('twitter-api-v2')
 
@@ -39,8 +37,6 @@ describe('postToTwitter', () => {
       v2: { tweet: mockTweet },
     }))
 
-    await expect(postToTwitter(creds, 'Hello!')).rejects.toThrow(
-      'Rate limited'
-    )
+    await expect(postToTwitter(creds, 'Hello!')).rejects.toThrow('Rate limited')
   })
 })

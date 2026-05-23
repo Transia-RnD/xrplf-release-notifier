@@ -3,7 +3,7 @@ import {
   handlePushEvent,
   handleReleaseEvent,
 } from '../../../src/webhook/handler'
-import { AppConfig } from '../../../src/config'
+import type { AppConfig } from '../../../src/config'
 import * as githubClient from '../../../src/github/client'
 import * as mattermost from '../../../src/notifications/mattermost'
 import * as twitter from '../../../src/notifications/twitter'
@@ -170,9 +170,9 @@ describe('handlePushEvent', () => {
         },
       ],
     }
-    await expect(
-      handlePushEvent(payload, mockConfig, logger)
-    ).rejects.toThrow('404 Not Found')
+    await expect(handlePushEvent(payload, mockConfig, logger)).rejects.toThrow(
+      '404 Not Found'
+    )
   })
 
   it('handles both notifications failing', async () => {

@@ -36,10 +36,7 @@ describe('verifySignature', () => {
   })
 
   it('rejects a signature without sha256= prefix', () => {
-    const hash = crypto
-      .createHmac('sha256', secret)
-      .update(body)
-      .digest('hex')
+    const hash = crypto.createHmac('sha256', secret).update(body).digest('hex')
     expect(verifySignature(body, hash, secret)).toBe(false)
   })
 

@@ -1,6 +1,7 @@
-import { VersionInfo, VersionType, NotificationSource } from '../version/types'
-import { MattermostAttachment, MattermostPayload } from './mattermost'
-import { Summaries } from '../ai/summarizer'
+import type { VersionInfo } from '../version/types'
+import { VersionType, NotificationSource } from '../version/types'
+import type { MattermostAttachment, MattermostPayload } from './mattermost'
+import type { Summaries } from '../ai/summarizer'
 
 export interface FormattedMessages {
   mattermost: MattermostPayload

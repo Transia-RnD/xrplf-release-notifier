@@ -1,9 +1,6 @@
 import { formatMessages } from '../../../src/notifications/formatter'
-import {
-  VersionInfo,
-  VersionType,
-  NotificationSource,
-} from '../../../src/version/types'
+import type { VersionInfo } from '../../../src/version/types'
+import { VersionType, NotificationSource } from '../../../src/version/types'
 
 function makeVersion(overrides: Partial<VersionInfo> = {}): VersionInfo {
   return {
@@ -19,7 +16,7 @@ function makeVersion(overrides: Partial<VersionInfo> = {}): VersionInfo {
   }
 }
 
-function mmText(msgs: { mattermost: { attachments?: Array<unknown> } }): string {
+function mmText(msgs: { mattermost: { attachments?: unknown[] } }): string {
   return JSON.stringify(msgs.mattermost)
 }
 

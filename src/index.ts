@@ -1,8 +1,10 @@
 import 'dotenv/config'
 import express from 'express'
+import type { Request, Response } from 'express'
 import { Storage } from '@google-cloud/storage'
 import winston from 'winston'
 import { loadConfig } from './config'
+import type { AppConfig } from './config'
 import { verifySignature } from './webhook/verify'
 import {
   handlePushEvent,
@@ -15,7 +17,8 @@ import {
 } from './poller/binary-checker'
 import { loadPollerState, savePollerState } from './poller/state'
 import { classifyVersion } from './version/parser'
-import { VersionInfo, NotificationSource } from './version/types'
+import type { VersionInfo } from './version/types'
+import { NotificationSource } from './version/types'
 import { formatMessages } from './notifications/formatter'
 import { summarizeReleaseByTag } from './ai/summarizer'
 
@@ -27,116 +30,151 @@ const logger = winston.createLogger({
 
 const app = express()
 
-async function start() {
+/** Wraps an async route handler so unhandled rejections become 500s, not crashes. */
+function asyncHandler(
+  fn: (req: Request, res: Response) => Promise<void>
+): (req: Request, res: Response) => void {
+  return (req, res) => {
+    fn(req, res).catch((err: unknown) => {
+      logger.error('Unhandled route error', {
+        path: req.path,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Internal error' })
+      }
+    })
+  }
+}
+
+async function start(): Promise<void> {
   const config = await loadConfig()
   const storage = new Storage({ projectId: config.gcpProjectId })
 
   app.post(
     '/webhook',
     express.raw({ type: '*/*' }),
-    async (req, res) => {
-      const signature = req.headers['x-hub-signature-256'] as string
-      if (
-        !signature ||
-        !Buffer.isBuffer(req.body) ||
-        !verifySignature(req.body, signature, config.githubWebhookSecret)
-      ) {
-        logger.warn('Invalid webhook signature')
-        res.status(401).json({ error: 'Invalid signature' })
-        return
-      }
-
-      try {
-        const event = (req.headers['x-github-event'] as string) || ''
-        const payload = JSON.parse(req.body.toString())
-
-        if (event === 'ping') {
-          res.status(200).json({ action: 'pong' })
-          return
-        }
-        if (event === 'push') {
-          const result = await handlePushEvent(payload, config, logger)
-          res.status(200).json(result)
-          return
-        }
-        if (event === 'release') {
-          const result = await handleReleaseEvent(payload, config, logger)
-          res.status(200).json(result)
-          return
-        }
-        res.status(200).json({ action: 'ignored', reason: `event: ${event}` })
-      } catch (err) {
-        logger.error('Webhook handler error', { error: err })
-        res.status(500).json({ error: 'Internal error' })
-      }
-    }
+    asyncHandler((req, res) => handleWebhook(req, res, config))
   )
 
-  app.post('/poll', express.json(), async (_req, res) => {
-    try {
-      const state = await loadPollerState(storage)
-      const current = await fetchLatestBinaryVersions()
-      const newVersion = detectNewVersions(current, state)
+  app.post(
+    '/poll',
+    express.json(),
+    asyncHandler((_req, res) => handlePoll(res, config, storage))
+  )
 
-      if (!newVersion) {
-        res.status(200).json({ action: 'no_change' })
-        return
-      }
-
-      const classified = classifyVersion(newVersion)
-      const versionInfo: VersionInfo = {
-        ...classified,
-        branch: 'release',
-        commitSha: '',
-        commitUrl: '',
-      }
-
-      const summary = await summarizeReleaseByTag({
-        owner: 'XRPLF',
-        repo: 'rippled',
-        tag: newVersion,
-        apiKey: config.anthropicApiKey,
-        githubToken: config.githubToken,
-        logger,
-      })
-
-      const messages = formatMessages(
-        versionInfo,
-        NotificationSource.BINARY_POLL,
-        summary
-      )
-      await sendNotifications(messages, config, logger)
-
-      const now = new Date().toISOString()
-      if (current.deb && current.deb !== state.deb?.version) {
-        state.deb = { version: current.deb, detectedAt: now }
-      }
-      if (current.rpm && current.rpm !== state.rpm?.version) {
-        state.rpm = { version: current.rpm, detectedAt: now }
-      }
-      await savePollerState(storage, state)
-
-      logger.info('Binary poll detected new version', {
-        version: newVersion,
-      })
-      res
-        .status(200)
-        .json({ action: 'notified', version: newVersion })
-    } catch (err) {
-      logger.error('Poll handler error', { error: err })
-      res.status(500).json({ error: 'Internal error' })
-    }
+  app.get('/', (_req, res) => {
+    res.status(200).json({ status: 'ok' })
   })
 
-  app.get('/', (_req, res) =>
-    res.status(200).json({ status: 'ok' })
-  )
-
   const port = config.port || 8080
-  app.listen(port, () => logger.info(`Listening on port ${port}`))
+  app.listen(port, () => {
+    logger.info(`Listening on port ${port}`)
+  })
 }
 
-start().catch((err) => {
+async function handleWebhook(
+  req: Request,
+  res: Response,
+  config: AppConfig
+): Promise<void> {
+  const signature = req.headers['x-hub-signature-256']
+  if (
+    typeof signature !== 'string' ||
+    !Buffer.isBuffer(req.body) ||
+    !verifySignature(req.body, signature, config.githubWebhookSecret)
+  ) {
+    logger.warn('Invalid webhook signature')
+    res.status(401).json({ error: 'Invalid signature' })
+    return
+  }
+
+  const event = (req.headers['x-github-event'] as string | undefined) ?? ''
+  const payload = JSON.parse(req.body.toString()) as Record<string, unknown>
+
+  if (event === 'ping') {
+    res.status(200).json({ action: 'pong' })
+    return
+  }
+  if (event === 'push') {
+    const result = await handlePushEvent(payload, config, logger)
+    res.status(200).json(result)
+    return
+  }
+  if (event === 'release') {
+    const result = await handleReleaseEvent(payload, config, logger)
+    res.status(200).json(result)
+    return
+  }
+  res.status(200).json({ action: 'ignored', reason: `event: ${event}` })
+}
+
+async function handlePoll(
+  res: Response,
+  config: AppConfig,
+  storage: Storage
+): Promise<void> {
+  const state = await loadPollerState(storage)
+  const current = await fetchLatestBinaryVersions()
+
+  // Cold-start guard: if there's no prior state, initialize from current
+  // without notifying. The first poll after a fresh deploy/state-reset must
+  // not announce the existing repos.ripple.com version as "new".
+  const isFirstRun = !state.deb && !state.rpm
+  if (isFirstRun) {
+    const now = new Date().toISOString()
+    if (current.deb) state.deb = { version: current.deb, detectedAt: now }
+    if (current.rpm) state.rpm = { version: current.rpm, detectedAt: now }
+    await savePollerState(storage, state)
+    logger.info('Poller state initialized', { current })
+    res.status(200).json({ action: 'initialized', state })
+    return
+  }
+
+  const newVersion = detectNewVersions(current, state)
+  if (!newVersion) {
+    res.status(200).json({ action: 'no_change' })
+    return
+  }
+
+  const classified = classifyVersion(newVersion)
+  const versionInfo: VersionInfo = {
+    ...classified,
+    branch: 'release',
+    commitSha: '',
+    commitUrl: '',
+  }
+
+  const summary = await summarizeReleaseByTag({
+    owner: 'XRPLF',
+    repo: 'rippled',
+    tag: newVersion,
+    apiKey: config.anthropicApiKey,
+    githubToken: config.githubToken,
+    logger,
+  })
+
+  const messages = formatMessages(
+    versionInfo,
+    NotificationSource.BINARY_POLL,
+    summary
+  )
+  await sendNotifications(messages, config, logger)
+
+  const now = new Date().toISOString()
+  if (current.deb && current.deb !== state.deb?.version) {
+    state.deb = { version: current.deb, detectedAt: now }
+  }
+  if (current.rpm && current.rpm !== state.rpm?.version) {
+    state.rpm = { version: current.rpm, detectedAt: now }
+  }
+  await savePollerState(storage, state)
+
+  logger.info('Binary poll detected new version', { version: newVersion })
+  res.status(200).json({ action: 'notified', version: newVersion })
+}
+
+start().catch((err: unknown) => {
   console.error('Startup failure', err)
   process.exit(1)
 })

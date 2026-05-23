@@ -1,19 +1,15 @@
-import { Logger } from 'winston'
+import type { Logger } from 'winston'
 import { fetchFileContent } from '../github/client'
 import { parseVersionFromContent, classifyVersion } from '../version/parser'
-import { VersionInfo, NotificationSource } from '../version/types'
+import type { VersionInfo } from '../version/types'
+import { NotificationSource } from '../version/types'
 import { formatMessages } from '../notifications/formatter'
-import {
-  postToMattermost,
-  MattermostPayload,
-} from '../notifications/mattermost'
+import type { MattermostPayload } from '../notifications/mattermost'
+import { postToMattermost } from '../notifications/mattermost'
 import { postToTwitter } from '../notifications/twitter'
-import {
-  summarizeReleaseByTag,
-  summarizeBody,
-  Summaries,
-} from '../ai/summarizer'
-import { AppConfig } from '../config'
+import type { Summaries } from '../ai/summarizer'
+import { summarizeReleaseByTag, summarizeBody } from '../ai/summarizer'
+import type { AppConfig } from '../config'
 
 const WATCHED_FILE = 'src/libxrpl/protocol/BuildInfo.cpp'
 const BRANCH_REGEX = /^refs\/heads\/(develop|release-\d+\.\d+)$/
@@ -56,13 +52,14 @@ async function handleBranchPush(
   config: AppConfig,
   logger: Logger
 ): Promise<HandlerResult> {
-  const commits = payload.commits as Array<{
+  const commits = payload.commits as {
     added?: string[]
     modified?: string[]
-  }>
+  }[]
   const fileModified = commits?.some(
     (c) =>
-      c.added?.includes(WATCHED_FILE) || c.modified?.includes(WATCHED_FILE)
+      Boolean(c.added?.includes(WATCHED_FILE)) ||
+      Boolean(c.modified?.includes(WATCHED_FILE))
   )
   if (!fileModified) {
     return { action: 'ignored', reason: 'BuildInfo.cpp not modified' }
@@ -105,7 +102,11 @@ async function handleBranchPush(
     logger,
   })
 
-  const messages = formatMessages(versionInfo, NotificationSource.WEBHOOK, summary)
+  const messages = formatMessages(
+    versionInfo,
+    NotificationSource.WEBHOOK,
+    summary
+  )
   await sendNotifications(messages, config, logger)
 
   return {
@@ -216,11 +217,24 @@ export async function handleReleaseEvent(
 
   const releaseBody = (payload.release as { body?: string } | undefined)?.body
   let summaries: Summaries = { mattermost: null, twitter: null }
-  if (config.anthropicApiKey && releaseBody && releaseBody.trim().length >= 20) {
-    summaries = await summarizeBody(releaseBody, tagName, config.anthropicApiKey, logger)
+  if (
+    config.anthropicApiKey &&
+    releaseBody &&
+    releaseBody.trim().length >= 20
+  ) {
+    summaries = await summarizeBody(
+      releaseBody,
+      tagName,
+      config.anthropicApiKey,
+      logger
+    )
   }
 
-  const messages = formatMessages(versionInfo, NotificationSource.RELEASE, summaries)
+  const messages = formatMessages(
+    versionInfo,
+    NotificationSource.RELEASE,
+    summaries
+  )
   await sendNotifications(messages, config, logger)
 
   return {
@@ -231,30 +245,63 @@ export async function handleReleaseEvent(
   }
 }
 
+/**
+ * Twitter creds may legitimately be unset / placeholder while we wait for
+ * a real account. Short-circuit instead of letting twitter-api-v2 spam the
+ * logs with 401s on every notification.
+ */
+function twitterConfigured(config: AppConfig): boolean {
+  return (
+    config.twitterApiKey.length > 0 &&
+    config.twitterApiKey !== 'placeholder' &&
+    config.twitterApiSecret.length > 0 &&
+    config.twitterApiSecret !== 'placeholder'
+  )
+}
+
 export async function sendNotifications(
   messages: { mattermost: MattermostPayload; twitter: string },
   config: AppConfig,
   logger: Logger
 ): Promise<void> {
-  const results = await Promise.allSettled([
-    postToMattermost(config.mattermostWebhookUrl, messages.mattermost),
-    postToTwitter(
-      {
-        appKey: config.twitterApiKey,
-        appSecret: config.twitterApiSecret,
-        accessToken: config.twitterAccessToken,
-        accessSecret: config.twitterAccessTokenSecret,
-      },
-      messages.twitter
-    ),
-  ])
+  const targets: { name: string; call: () => Promise<void> }[] = [
+    {
+      name: 'Mattermost',
+      call: () =>
+        postToMattermost(config.mattermostWebhookUrl, messages.mattermost),
+    },
+  ]
 
+  if (twitterConfigured(config)) {
+    targets.push({
+      name: 'Twitter',
+      call: () =>
+        postToTwitter(
+          {
+            appKey: config.twitterApiKey,
+            appSecret: config.twitterApiSecret,
+            accessToken: config.twitterAccessToken,
+            accessSecret: config.twitterAccessTokenSecret,
+          },
+          messages.twitter
+        ),
+    })
+  } else {
+    logger.info('Twitter not configured — skipping post', {
+      tweet: messages.twitter,
+    })
+  }
+
+  const results = await Promise.allSettled(targets.map((t) => t.call()))
   results.forEach((r, i) => {
-    const target = i === 0 ? 'Mattermost' : 'Twitter'
+    const name = targets[i].name
     if (r.status === 'rejected') {
-      logger.error(`${target} notification failed`, { error: r.reason })
+      const reason: unknown = r.reason
+      logger.error(`${name} notification failed`, {
+        error: reason instanceof Error ? reason.message : String(reason),
+      })
     } else {
-      logger.info(`${target} notification sent`)
+      logger.info(`${name} notification sent`)
     }
   })
 }

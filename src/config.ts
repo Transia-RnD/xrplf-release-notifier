@@ -14,11 +14,21 @@ export interface AppConfig {
   gcsBucket: string
 }
 
+interface AppSecrets {
+  GITHUB_WEBHOOK_SECRET: string
+  GITHUB_TOKEN?: string
+  MATTERMOST_WEBHOOK_URL: string
+  TWITTER_API_KEY: string
+  TWITTER_API_SECRET: string
+  TWITTER_ACCESS_TOKEN: string
+  TWITTER_ACCESS_TOKEN_SECRET: string
+  ANTHROPIC_API_KEY?: string
+}
+
 export async function loadConfig(): Promise<AppConfig> {
-  const port = parseInt(process.env.PORT || '3000', 10)
-  const gcpProjectId = process.env.GCP_PROJECT_ID || ''
-  const gcsBucket =
-    process.env.GCS_BUCKET || 'xrplf-release-notifier'
+  const port = parseInt(process.env.PORT ?? '3000', 10)
+  const gcpProjectId = process.env.GCP_PROJECT_ID ?? ''
+  const gcsBucket = process.env.GCS_BUCKET ?? 'xrplf-release-notifier'
 
   if (process.env.NODE_ENV === 'production' && gcpProjectId) {
     return loadFromSecretManager(port, gcpProjectId, gcsBucket)
@@ -26,13 +36,13 @@ export async function loadConfig(): Promise<AppConfig> {
 
   return {
     port,
-    githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET || '',
+    githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET ?? '',
     githubToken: process.env.GITHUB_TOKEN,
-    mattermostWebhookUrl: process.env.MATTERMOST_WEBHOOK_URL || '',
-    twitterApiKey: process.env.TWITTER_API_KEY || '',
-    twitterApiSecret: process.env.TWITTER_API_SECRET || '',
-    twitterAccessToken: process.env.TWITTER_ACCESS_TOKEN || '',
-    twitterAccessTokenSecret: process.env.TWITTER_ACCESS_TOKEN_SECRET || '',
+    mattermostWebhookUrl: process.env.MATTERMOST_WEBHOOK_URL ?? '',
+    twitterApiKey: process.env.TWITTER_API_KEY ?? '',
+    twitterApiSecret: process.env.TWITTER_API_SECRET ?? '',
+    twitterAccessToken: process.env.TWITTER_ACCESS_TOKEN ?? '',
+    twitterAccessTokenSecret: process.env.TWITTER_ACCESS_TOKEN_SECRET ?? '',
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
     gcpProjectId,
     gcsBucket,
@@ -45,15 +55,14 @@ async function loadFromSecretManager(
   gcsBucket: string
 ): Promise<AppConfig> {
   const client = new SecretManagerServiceClient()
-  const secretVersion =
-    process.env.APP_SECRET_VERSION || 'latest'
+  const secretVersion = process.env.APP_SECRET_VERSION ?? 'latest'
   const name = `projects/${gcpProjectId}/secrets/APP_SECRETS/versions/${secretVersion}`
 
   const [version] = await client.accessSecretVersion({ name })
   const payload = version.payload?.data?.toString()
   if (!payload) throw new Error('Empty secret payload')
 
-  const secrets = JSON.parse(payload)
+  const secrets = JSON.parse(payload) as AppSecrets
 
   return {
     port,

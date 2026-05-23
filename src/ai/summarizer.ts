@@ -1,10 +1,10 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { Logger } from 'winston'
+import type { Logger } from 'winston'
+import type { CommitSummary } from '../github/client'
 import {
   fetchReleaseBody,
   listVersionTags,
   compareCommits,
-  CommitSummary,
 } from '../github/client'
 import { compareVersions } from '../poller/binary-checker'
 
@@ -79,7 +79,12 @@ export async function summarizeReleaseByTag(
 
   let body: string | null = null
   try {
-    body = await fetchReleaseBody(opts.owner, opts.repo, opts.tag, opts.githubToken)
+    body = await fetchReleaseBody(
+      opts.owner,
+      opts.repo,
+      opts.tag,
+      opts.githubToken
+    )
   } catch (err) {
     opts.logger?.warn('Failed to fetch release body for summary', {
       tag: opts.tag,
@@ -120,7 +125,9 @@ export async function summarizeBody(
   })
 }
 
-async function summarizeCommitsSinceLast(opts: SummarizeOptions): Promise<Summaries> {
+async function summarizeCommitsSinceLast(
+  opts: SummarizeOptions
+): Promise<Summaries> {
   let tags: string[]
   try {
     tags = await listVersionTags(opts.owner, opts.repo, opts.githubToken)
@@ -144,13 +151,21 @@ async function summarizeCommitsSinceLast(opts: SummarizeOptions): Promise<Summar
 
   const prior = predecessors.at(-1)
   if (!prior) {
-    opts.logger?.info('No predecessor tag found for commit-compare', { tag: opts.tag })
+    opts.logger?.info('No predecessor tag found for commit-compare', {
+      tag: opts.tag,
+    })
     return EMPTY
   }
 
   let commits: CommitSummary[] | null
   try {
-    commits = await compareCommits(opts.owner, opts.repo, prior.raw, opts.tag, opts.githubToken)
+    commits = await compareCommits(
+      opts.owner,
+      opts.repo,
+      prior.raw,
+      opts.tag,
+      opts.githubToken
+    )
   } catch (err) {
     opts.logger?.warn('Compare API failed', {
       base: prior.raw,
@@ -168,10 +183,20 @@ async function summarizeCommitsSinceLast(opts: SummarizeOptions): Promise<Summar
     return EMPTY
   }
 
-  return summarizeCommitsList(commits, opts.tag, prior.raw, opts.apiKey!, opts.logger)
+  // apiKey is guaranteed by the top of summarizeReleaseByTag, which is the
+  // only caller of summarizeCommitsSinceLast.
+  if (!opts.apiKey) return EMPTY
+  return summarizeCommitsList(
+    commits,
+    opts.tag,
+    prior.raw,
+    opts.apiKey,
+    opts.logger
+  )
 }
 
-const TRIVIAL_COMMIT = /^(merge |bump version|version bump|set version|clang-format|format:)/i
+const TRIVIAL_COMMIT =
+  /^(merge |bump version|version bump|set version|clang-format|format:)/i
 
 async function summarizeCommitsList(
   commits: CommitSummary[],
