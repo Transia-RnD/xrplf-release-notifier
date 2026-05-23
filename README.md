@@ -47,6 +47,21 @@ curl -X POST http://localhost:3000/webhook \
 npm test
 ```
 
+## Dry-run (iterating on copy)
+
+To see exactly what would be posted to Mattermost and Twitter for a given rippled tag — without sending anything to either — run:
+
+```bash
+npm run build
+npx ts-node scripts/dry-run.ts            # latest beta tag
+npx ts-node scripts/dry-run.ts 3.1.3      # specific tag (final, has GitHub Release)
+npx ts-node scripts/dry-run.ts 3.2.0-b6   # beta tag (no Release → commit-compare fallback)
+```
+
+The script renders every notification scenario the tag could trigger (source bump, tag push, release published, binary published) with both the Mattermost attachment and the AI-generated tweet, and prints them side by side. `ANTHROPIC_API_KEY` must be set in `.env` for AI summaries to render.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the iteration loop and which files to edit for prompt / copy changes.
+
 ## Deployment
 
 Deployed to GCP Cloud Run via Cloud Build:

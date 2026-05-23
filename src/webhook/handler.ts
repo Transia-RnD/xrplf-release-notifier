@@ -8,7 +8,11 @@ import {
   MattermostPayload,
 } from '../notifications/mattermost'
 import { postToTwitter } from '../notifications/twitter'
-import { summarizeReleaseByTag, summarizeBody } from '../ai/summarizer'
+import {
+  summarizeReleaseByTag,
+  summarizeBody,
+  Summaries,
+} from '../ai/summarizer'
 import { AppConfig } from '../config'
 
 const WATCHED_FILE = 'src/libxrpl/protocol/BuildInfo.cpp'
@@ -211,12 +215,12 @@ export async function handleReleaseEvent(
   }
 
   const releaseBody = (payload.release as { body?: string } | undefined)?.body
-  let summary: string | null = null
+  let summaries: Summaries = { mattermost: null, twitter: null }
   if (config.anthropicApiKey && releaseBody && releaseBody.trim().length >= 20) {
-    summary = await summarizeBody(releaseBody, tagName, config.anthropicApiKey, logger)
+    summaries = await summarizeBody(releaseBody, tagName, config.anthropicApiKey, logger)
   }
 
-  const messages = formatMessages(versionInfo, NotificationSource.RELEASE, summary)
+  const messages = formatMessages(versionInfo, NotificationSource.RELEASE, summaries)
   await sendNotifications(messages, config, logger)
 
   return {

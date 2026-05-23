@@ -1,10 +1,13 @@
 import { VersionInfo, VersionType, NotificationSource } from '../version/types'
 import { MattermostAttachment, MattermostPayload } from './mattermost'
+import { Summaries } from '../ai/summarizer'
 
 export interface FormattedMessages {
   mattermost: MattermostPayload
   twitter: string
 }
+
+const NO_SUMMARIES: Summaries = { mattermost: null, twitter: null }
 
 const USERNAME = 'rippled releases'
 const ICON_URL = 'https://eotjzkw.dlvr.cloud/pasted_2.png'
@@ -18,7 +21,7 @@ const COLOR_TAG = '#2196F3'
 export function formatMessages(
   version: VersionInfo,
   source: NotificationSource = NotificationSource.WEBHOOK,
-  summary: string | null = null
+  summaries: Summaries = NO_SUMMARIES
 ): FormattedMessages {
   const msgs = (() => {
     switch (source) {
@@ -33,10 +36,14 @@ export function formatMessages(
     }
   })()
 
-  if (summary && msgs.mattermost.attachments?.[0]) {
+  if (summaries.mattermost && msgs.mattermost.attachments?.[0]) {
     const att = msgs.mattermost.attachments[0]
     const existing = att.text ? `${att.text}\n\n` : ''
-    att.text = `${existing}${summary}`
+    att.text = `${existing}${summaries.mattermost}`
+  }
+
+  if (summaries.twitter) {
+    msgs.twitter = summaries.twitter
   }
 
   return msgs
