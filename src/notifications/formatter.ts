@@ -77,7 +77,7 @@ function formatWebhookMessages(version: VersionInfo): FormattedMessages {
           title: 'View commit',
           title_link: version.commitUrl,
         }),
-        twitter: `rippled ${version.raw} (beta) version bumped on the ${version.branch} branch. #XRPLedger #rippled`,
+        twitter: `🧪 New beta drop! rippled ${version.raw} (beta) just landed on the ${version.branch} branch. Builders & validators — give it a spin. #XRPLedger #rippled`,
       }
     case VersionType.RC:
       return {
@@ -89,7 +89,7 @@ function formatWebhookMessages(version: VersionInfo): FormattedMessages {
           title: 'View commit',
           title_link: version.commitUrl,
         }),
-        twitter: `rippled ${version.raw} release candidate is now available. Operators: please begin testing. #XRPLedger #rippled`,
+        twitter: `🚀 rippled ${version.raw} release candidate is here! Operators — please begin testing and help shape the final cut. #XRPLedger #rippled`,
       }
     case VersionType.FINAL:
       return {

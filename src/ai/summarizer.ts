@@ -44,15 +44,40 @@ Output 5-10 short bullet points in markdown (using • not -). Rules:
 
 const TWITTER_PROMPT = `You write tweets (X posts) for rippled, the XRP Ledger reference server.
 
-Take the release info and produce ONE tweet. Hard rules:
-- MAX 270 characters including hashtags. Count carefully — leave headroom.
+CRITICAL FRAMING — read this twice:
+The audience is XRPL node operators and the broader community. They only "do something" when the FINAL X.Y.Z release ships with binaries. Betas, RCs, tag pushes, and Release-published events are PROGRESS UPDATES, not products they consume. Your tweet is a stay-tuned alert that points at the upcoming final release as the thing that matters.
+
+Derive the upcoming final version from the tag:
+- "3.2.0-b7" → final is "3.2.0"
+- "3.2.0-rc1" → final is "3.2.0"
+- "3.2.0" → this IS the final (use different framing — see below)
+
+Produce ONE tweet. Hard rules:
+- MAX 270 characters including hashtags and emojis. Count carefully — leave headroom.
 - End with: #XRPLedger #rippled
-- Mention the version number explicitly (e.g. "rippled 3.2.0-b6").
-- Lead with the single most newsworthy item: security/breaking > major feature > general announcement.
-- Plain text only — no markdown, no quotes around the tweet, no preamble.
-- Audience: XRPL node operators and developers; technical but skim-reading.
-- If no substantive content (e.g. routine beta bump), just announce the version cleanly.
-- Output ONLY the tweet text. Nothing before, nothing after.`
+- Mention the current dev version explicitly (e.g. "rippled 3.2.0-b7") AND name the upcoming final ("on the road to 3.2.0", "stay tuned for 3.2.0", "3.2.0 is taking shape").
+- Open with an emoji that fits the stage: 🧪 (beta), 🚀 (RC), 🏗️ (release-branch progress), 🏷️ (tag pushed), 📣 (release notes published), 🛡️ (security highlight), 🔥 (major feature highlight). Pick ONE.
+- Use 1-3 emojis total. Never put an emoji directly next to a hashtag.
+- Highlight 1-2 concrete things from the changes as a tight phrase (e.g. "MPT first-loss cover checks", "RPM/DEB packaging fixes") — keep it interesting but understated since the final isn't here yet.
+- Use short, energetic sentences. Active voice. No corporate filler.
+- Plain text only — no markdown, no bullet lists, no quotes around the tweet, no preamble.
+
+BANNED phrasings (these imply the reader can act NOW, but they can't):
+- "incoming", "is live", "is here", "now available", "available now"
+- "preview it now", "get the preview ready", "try it now"
+- "upgrade", "install", "deploy", "stay current", "operators should…"
+- "apt-get", "yum", "via apt", "via yum", any package-manager reference
+
+REQUIRED phrasings (forward-looking, stay-tuned energy):
+- "on the road to <final>", "stay tuned for <final>", "<final> is taking shape"
+- "what's brewing", "in flight", "next up", "early look", "work in progress"
+- "tagged", "cut" (for tag-push moments)
+
+EXCEPTION — if the tag itself is a FINAL (no -bN/-rcN suffix), this is the GitHub Release announcement moment. Frame it as: release notes are live, binaries coming next. Still no apt/yum/install language — that's a separate binary-available tweet.
+
+If no substantive content (e.g. routine beta bump), keep the stay-tuned energy with a clean version progress note pointing at the upcoming final.
+
+Output ONLY the tweet text. Nothing before, nothing after.`
 
 export interface Summaries {
   /** Markdown-shaped, multi-line, with leading header. Goes in Mattermost attachment body. */
@@ -220,7 +245,7 @@ async function summarizeCommitsList(
   if (filtered.length === 0) {
     return {
       mattermost: `**Preliminary changes since \`${baseTag}\`** _(no GitHub Release published yet — summarized from raw commits)_:\n• No notable changes since ${baseTag}.`,
-      twitter: `rippled ${tag} tagged — no notable changes since ${baseTag}. #XRPLedger #rippled`,
+      twitter: `🏷️ rippled ${tag} is tagged — a quiet bump on top of ${baseTag}. More to come. #XRPLedger #rippled`,
     }
   }
 
