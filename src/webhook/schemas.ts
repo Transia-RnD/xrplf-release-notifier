@@ -36,7 +36,6 @@ export const ReleaseEventSchema = z.object({
       html_url: z.string().optional(),
       body: z.string().optional().nullable(),
       draft: z.boolean().optional(),
-      prerelease: z.boolean().optional(),
     })
     .optional(),
 })

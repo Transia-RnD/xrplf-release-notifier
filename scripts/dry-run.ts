@@ -15,7 +15,7 @@ import axios from 'axios'
 import winston from 'winston'
 import type { Summaries } from '../src/ai/summarizer'
 import { summarizeReleaseByTag } from '../src/ai/summarizer'
-import { formatMessages } from '../src/notifications/formatter'
+import { formatMattermost } from '../src/notifications/mattermost'
 import type { VersionInfo } from '../src/version/types'
 import { NotificationSource, VersionType } from '../src/version/types'
 import { classifyVersion } from '../src/version/parser'
@@ -103,13 +103,17 @@ function buildScenarios(
 }
 
 function renderScenario(s: ScenarioRender, summaries: Summaries) {
-  const msgs = formatMessages(s.versionInfo, s.source, summaries)
-  const att = msgs.mattermost.attachments?.[0]
+  const mattermost = formatMattermost(
+    s.versionInfo,
+    s.source,
+    summaries.mattermost
+  )
+  const att = mattermost.attachments?.[0]
   return {
     scenario: s.scenario,
     mattermost: {
-      username: msgs.mattermost.username,
-      icon_url: msgs.mattermost.icon_url,
+      username: mattermost.username,
+      icon_url: mattermost.icon_url,
       color: att?.color,
       pretext: att?.pretext,
       title: att?.title,
@@ -117,8 +121,8 @@ function renderScenario(s: ScenarioRender, summaries: Summaries) {
       text: att?.text,
       footer: att?.footer,
     },
-    twitter: msgs.twitter,
-    twitter_chars: msgs.twitter.length,
+    twitter: summaries.twitter,
+    twitter_chars: summaries.twitter.length,
   }
 }
 
@@ -154,6 +158,12 @@ function printHuman(rendered: ReturnType<typeof renderScenario>[]) {
 }
 
 async function main() {
+  const apiKey = process.env.ANTHROPIC_API_KEY
+  if (!apiKey) {
+    console.error('ANTHROPIC_API_KEY is required — set it in .env')
+    process.exit(1)
+  }
+
   const logger = winston.createLogger({
     level: jsonMode ? 'error' : 'info',
     format: winston.format.simple(),
@@ -167,9 +177,6 @@ async function main() {
   const tag = await pickTag()
   if (!jsonMode) {
     console.log(`\nDry-run for rippled ${tag}`)
-    console.log(
-      `Source: ${process.env.ANTHROPIC_API_KEY ? 'AI summaries enabled (Haiku 4.5)' : 'NO ANTHROPIC_API_KEY — summaries will be null'}`
-    )
   }
 
   let version: ReturnType<typeof classifyVersion>
@@ -186,7 +193,7 @@ async function main() {
     owner: OWNER,
     repo: REPO,
     tag,
-    apiKey: process.env.ANTHROPIC_API_KEY,
+    apiKey,
     githubToken: process.env.GITHUB_TOKEN,
     logger,
   })

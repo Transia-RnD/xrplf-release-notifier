@@ -81,48 +81,34 @@ Output ONLY the tweet text. Nothing before, nothing after.`
 
 export interface Summaries {
   /** Markdown-shaped, multi-line, with leading header. Goes in Mattermost attachment body. */
-  mattermost: string | null
-  /** Single line, ≤280 chars including hashtags. Replaces the default Twitter text. */
-  twitter: string | null
+  mattermost: string
+  /** Single line, ≤280 chars including hashtags. The tweet body. */
+  twitter: string
 }
-
-const EMPTY: Summaries = { mattermost: null, twitter: null }
 
 export interface SummarizeOptions {
   owner: string
   repo: string
   tag: string
-  apiKey?: string
+  apiKey: string
   githubToken?: string
   logger?: Logger
 }
 
 /**
  * Top-level: try GitHub Release body first, then commit-compare fallback.
- * Returns both Mattermost and Twitter shaped summaries from one source.
+ * Throws on any failure — callers handle 5xx propagation. Returning a
+ * partial/fallback would post garbage to public channels.
  */
 export async function summarizeReleaseByTag(
   opts: SummarizeOptions
 ): Promise<Summaries> {
-  if (!opts.apiKey) {
-    opts.logger?.info('Skipping AI summary — no ANTHROPIC_API_KEY configured')
-    return EMPTY
-  }
-
-  let body: string | null = null
-  try {
-    body = await fetchReleaseBody(
-      opts.owner,
-      opts.repo,
-      opts.tag,
-      opts.githubToken
-    )
-  } catch (err) {
-    opts.logger?.warn('Failed to fetch release body for summary', {
-      tag: opts.tag,
-      error: err instanceof Error ? err.message : String(err),
-    })
-  }
+  const body = await fetchReleaseBody(
+    opts.owner,
+    opts.repo,
+    opts.tag,
+    opts.githubToken
+  )
 
   if (body && body.trim().length >= MIN_RELEASE_BODY_CHARS) {
     return summarizeBody(body, opts.tag, opts.apiKey, opts.logger)
@@ -160,15 +146,7 @@ export async function summarizeBody(
 async function summarizeCommitsSinceLast(
   opts: SummarizeOptions
 ): Promise<Summaries> {
-  let tags: string[]
-  try {
-    tags = await listVersionTags(opts.owner, opts.repo, opts.githubToken)
-  } catch (err) {
-    opts.logger?.warn('Failed to list tags for commit-compare', {
-      error: err instanceof Error ? err.message : String(err),
-    })
-    return EMPTY
-  }
+  const tags = await listVersionTags(opts.owner, opts.repo, opts.githubToken)
 
   const target = opts.tag.replace(/^v/, '')
   const targetIsFinal = !target.includes('-')
@@ -183,41 +161,23 @@ async function summarizeCommitsSinceLast(
 
   const prior = predecessors.at(-1)
   if (!prior) {
-    opts.logger?.info('No predecessor tag found for commit-compare', {
-      tag: opts.tag,
-    })
-    return EMPTY
+    throw new Error(`No predecessor tag found for ${opts.tag}`)
   }
 
-  let commits: CommitSummary[] | null
-  try {
-    commits = await compareCommits(
-      opts.owner,
-      opts.repo,
-      prior.raw,
-      opts.tag,
-      opts.githubToken
-    )
-  } catch (err) {
-    opts.logger?.warn('Compare API failed', {
-      base: prior.raw,
-      head: opts.tag,
-      error: err instanceof Error ? err.message : String(err),
-    })
-    return EMPTY
-  }
+  const commits = await compareCommits(
+    opts.owner,
+    opts.repo,
+    prior.raw,
+    opts.tag,
+    opts.githubToken
+  )
 
   if (!commits || commits.length === 0) {
-    opts.logger?.info('No commits between predecessor and target', {
-      base: prior.raw,
-      head: opts.tag,
-    })
-    return EMPTY
+    throw new Error(
+      `No commits between ${prior.raw} and ${opts.tag} — refusing to summarize an empty diff`
+    )
   }
 
-  // apiKey is guaranteed by the top of summarizeReleaseByTag, which is the
-  // only caller of summarizeCommitsSinceLast.
-  if (!opts.apiKey) return EMPTY
   return summarizeCommitsList(
     commits,
     opts.tag,
@@ -243,10 +203,9 @@ async function summarizeCommitsList(
     .slice(0, MAX_COMMITS_FOR_SUMMARY)
 
   if (filtered.length === 0) {
-    return {
-      mattermost: `**Preliminary changes since \`${baseTag}\`** _(no GitHub Release published yet — summarized from raw commits)_:\n• No notable changes since ${baseTag}.`,
-      twitter: `🏷️ rippled ${tag} is tagged — a quiet bump on top of ${baseTag}. More to come. #XRPLedger #rippled`,
-    }
+    throw new Error(
+      `All commits between ${baseTag} and ${tag} are trivial (merges/version bumps/format-only) — refusing to summarize`
+    )
   }
 
   const commitList = filtered
@@ -276,7 +235,7 @@ interface RunBothOpts {
   source: string
 }
 
-/** Fires both AI calls in parallel for low latency and bundles them up. */
+/** Fires both AI calls in parallel for low latency. Any failure throws. */
 async function runBothPrompts(opts: RunBothOpts): Promise<Summaries> {
   const client = new Anthropic({ apiKey: opts.apiKey })
 
@@ -287,15 +246,7 @@ async function runBothPrompts(opts: RunBothOpts): Promise<Summaries> {
       system: opts.mattermostSystem,
       messages: [{ role: 'user', content: opts.mattermostUser }],
     })
-    .then((r) => extractText(r))
-    .catch((err) => {
-      opts.logger?.warn('Mattermost summarization failed', {
-        tag: opts.tag,
-        source: opts.source,
-        error: err instanceof Error ? err.message : String(err),
-      })
-      return null
-    })
+    .then((r) => extractText(r, 'mattermost'))
 
   const twitterCall = client.messages
     .create({
@@ -304,36 +255,37 @@ async function runBothPrompts(opts: RunBothOpts): Promise<Summaries> {
       system: TWITTER_PROMPT,
       messages: [{ role: 'user', content: opts.twitterUser }],
     })
-    .then((r) => extractText(r))
-    .catch((err) => {
-      opts.logger?.warn('Twitter summarization failed', {
-        tag: opts.tag,
-        source: opts.source,
-        error: err instanceof Error ? err.message : String(err),
-      })
-      return null
-    })
+    .then((r) => extractText(r, 'twitter'))
 
   const [mmText, twText] = await Promise.all([mattermostCall, twitterCall])
+
+  if (twText.length > TWITTER_MAX_CHARS) {
+    throw new Error(
+      `AI tweet exceeded ${TWITTER_MAX_CHARS} chars (${twText.length}) — refusing to post`
+    )
+  }
 
   opts.logger?.info('Generated AI summaries', {
     tag: opts.tag,
     source: opts.source,
-    mattermost_chars: mmText?.length ?? 0,
-    twitter_chars: twText?.length ?? 0,
+    mattermost_chars: mmText.length,
+    twitter_chars: twText.length,
   })
 
   return {
-    mattermost: mmText ? `${opts.mattermostHeader}\n${mmText}` : null,
-    twitter: twText && twText.length <= TWITTER_MAX_CHARS ? twText : null,
+    mattermost: `${opts.mattermostHeader}\n${mmText}`,
+    twitter: twText,
   }
 }
 
-function extractText(response: Anthropic.Message): string | null {
+function extractText(response: Anthropic.Message, channel: string): string {
   const text = response.content
     .filter((b): b is Anthropic.TextBlock => b.type === 'text')
     .map((b) => b.text)
     .join('\n')
     .trim()
-  return text || null
+  if (!text) {
+    throw new Error(`Empty AI response for ${channel}`)
+  }
+  return text
 }

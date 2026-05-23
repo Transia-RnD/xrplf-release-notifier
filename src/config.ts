@@ -1,5 +1,11 @@
 import { SecretManagerServiceClient } from '@google-cloud/secret-manager'
 
+function requireEnv(name: string): string {
+  const value = process.env[name]
+  if (!value) throw new Error(`Required env var missing: ${name}`)
+  return value
+}
+
 export interface AppConfig {
   port: number
   githubWebhookSecret: string
@@ -9,10 +15,9 @@ export interface AppConfig {
   twitterApiSecret: string
   twitterAccessToken: string
   twitterAccessTokenSecret: string
-  anthropicApiKey?: string
+  anthropicApiKey: string
   pollerToken?: string
   gcpProjectId: string
-  gcsBucket: string
 }
 
 interface AppSecrets {
@@ -23,17 +28,16 @@ interface AppSecrets {
   TWITTER_API_SECRET: string
   TWITTER_ACCESS_TOKEN: string
   TWITTER_ACCESS_TOKEN_SECRET: string
-  ANTHROPIC_API_KEY?: string
+  ANTHROPIC_API_KEY: string
   POLLER_TOKEN?: string
 }
 
 export async function loadConfig(): Promise<AppConfig> {
   const port = parseInt(process.env.PORT ?? '3000', 10)
   const gcpProjectId = process.env.GCP_PROJECT_ID ?? ''
-  const gcsBucket = process.env.GCS_BUCKET ?? 'xrplf-release-notifier'
 
   if (process.env.NODE_ENV === 'production' && gcpProjectId) {
-    return loadFromSecretManager(port, gcpProjectId, gcsBucket)
+    return loadFromSecretManager(port, gcpProjectId)
   }
 
   return {
@@ -45,17 +49,15 @@ export async function loadConfig(): Promise<AppConfig> {
     twitterApiSecret: process.env.TWITTER_API_SECRET ?? '',
     twitterAccessToken: process.env.TWITTER_ACCESS_TOKEN ?? '',
     twitterAccessTokenSecret: process.env.TWITTER_ACCESS_TOKEN_SECRET ?? '',
-    anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+    anthropicApiKey: requireEnv('ANTHROPIC_API_KEY'),
     pollerToken: process.env.POLLER_TOKEN,
     gcpProjectId,
-    gcsBucket,
   }
 }
 
 async function loadFromSecretManager(
   port: number,
-  gcpProjectId: string,
-  gcsBucket: string
+  gcpProjectId: string
 ): Promise<AppConfig> {
   const client = new SecretManagerServiceClient()
   const secretVersion = process.env.APP_SECRET_VERSION ?? 'latest'
@@ -66,6 +68,10 @@ async function loadFromSecretManager(
   if (!payload) throw new Error('Empty secret payload')
 
   const secrets = JSON.parse(payload) as AppSecrets
+
+  if (!secrets.ANTHROPIC_API_KEY) {
+    throw new Error('APP_SECRETS.ANTHROPIC_API_KEY is required')
+  }
 
   return {
     port,
@@ -79,6 +85,5 @@ async function loadFromSecretManager(
     anthropicApiKey: secrets.ANTHROPIC_API_KEY,
     pollerToken: secrets.POLLER_TOKEN,
     gcpProjectId,
-    gcsBucket,
   }
 }

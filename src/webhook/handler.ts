@@ -3,11 +3,9 @@ import { fetchFileContent } from '../github/client'
 import { parseVersionFromContent, classifyVersion } from '../version/parser'
 import type { VersionInfo } from '../version/types'
 import { NotificationSource } from '../version/types'
-import { formatMessages } from '../notifications/formatter'
 import type { MattermostPayload } from '../notifications/mattermost'
-import { postToMattermost } from '../notifications/mattermost'
+import { formatMattermost, postToMattermost } from '../notifications/mattermost'
 import { postToTwitter } from '../notifications/twitter'
-import type { Summaries } from '../ai/summarizer'
 import {
   summarizeReleaseByTag,
   summarizeBody,
@@ -117,12 +115,18 @@ async function handleBranchPush(
     logger,
   })
 
-  const messages = formatMessages(
-    versionInfo,
-    NotificationSource.WEBHOOK,
-    summary
+  await sendNotifications(
+    {
+      mattermost: formatMattermost(
+        versionInfo,
+        NotificationSource.WEBHOOK,
+        summary.mattermost
+      ),
+      twitter: summary.twitter,
+    },
+    config,
+    logger
   )
-  await sendNotifications(messages, config, logger)
 
   return {
     action: 'notified',
@@ -172,8 +176,18 @@ async function handleTagPush(
     logger,
   })
 
-  const messages = formatMessages(versionInfo, NotificationSource.TAG, summary)
-  await sendNotifications(messages, config, logger)
+  await sendNotifications(
+    {
+      mattermost: formatMattermost(
+        versionInfo,
+        NotificationSource.TAG,
+        summary.mattermost
+      ),
+      twitter: summary.twitter,
+    },
+    config,
+    logger
+  )
 
   return {
     action: 'notified',
@@ -229,26 +243,35 @@ export async function handleReleaseEvent(
   }
 
   const releaseBody = release.body
-  let summaries: Summaries = { mattermost: null, twitter: null }
-  if (
-    config.anthropicApiKey &&
-    releaseBody &&
-    releaseBody.trim().length >= MIN_RELEASE_BODY_CHARS
-  ) {
-    summaries = await summarizeBody(
-      releaseBody,
-      tagName,
-      config.anthropicApiKey,
-      logger
-    )
-  }
+  const summaries =
+    releaseBody && releaseBody.trim().length >= MIN_RELEASE_BODY_CHARS
+      ? await summarizeBody(
+          releaseBody,
+          tagName,
+          config.anthropicApiKey,
+          logger
+        )
+      : await summarizeReleaseByTag({
+          owner: 'XRPLF',
+          repo: 'rippled',
+          tag: tagName,
+          apiKey: config.anthropicApiKey,
+          githubToken: config.githubToken,
+          logger,
+        })
 
-  const messages = formatMessages(
-    versionInfo,
-    NotificationSource.RELEASE,
-    summaries
+  await sendNotifications(
+    {
+      mattermost: formatMattermost(
+        versionInfo,
+        NotificationSource.RELEASE,
+        summaries.mattermost
+      ),
+      twitter: summaries.twitter,
+    },
+    config,
+    logger
   )
-  await sendNotifications(messages, config, logger)
 
   return {
     action: 'notified',

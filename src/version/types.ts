@@ -10,7 +10,6 @@ export interface VersionInfo {
   minor: number
   patch: number
   type: VersionType
-  prerelease?: string
   branch: string
   commitSha: string
   commitUrl: string

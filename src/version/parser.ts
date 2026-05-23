@@ -27,6 +27,5 @@ export function classifyVersion(raw: string) {
     minor: +m[2],
     patch: +m[3],
     type,
-    prerelease: suffix ? `${m[4]}${m[5]}` : undefined,
   }
 }

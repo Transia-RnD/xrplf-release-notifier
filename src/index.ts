@@ -19,7 +19,7 @@ import { loadPollerState, savePollerState } from './poller/state'
 import { classifyVersion } from './version/parser'
 import type { VersionInfo } from './version/types'
 import { NotificationSource } from './version/types'
-import { formatMessages } from './notifications/formatter'
+import { formatMattermost } from './notifications/mattermost'
 import { summarizeReleaseByTag } from './ai/summarizer'
 
 const logger = winston.createLogger({
@@ -174,12 +174,18 @@ async function handlePoll(
     logger,
   })
 
-  const messages = formatMessages(
-    versionInfo,
-    NotificationSource.BINARY_POLL,
-    summary
+  await sendNotifications(
+    {
+      mattermost: formatMattermost(
+        versionInfo,
+        NotificationSource.BINARY_POLL,
+        summary.mattermost
+      ),
+      twitter: summary.twitter,
+    },
+    config,
+    logger
   )
-  await sendNotifications(messages, config, logger)
 
   const now = new Date().toISOString()
   if (current.deb && current.deb !== state.deb?.version) {

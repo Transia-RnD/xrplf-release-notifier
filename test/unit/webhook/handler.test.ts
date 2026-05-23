@@ -7,10 +7,28 @@ import type { AppConfig } from '../../../src/config'
 import * as githubClient from '../../../src/github/client'
 import * as mattermost from '../../../src/notifications/mattermost'
 import * as twitter from '../../../src/notifications/twitter'
+import * as summarizer from '../../../src/ai/summarizer'
 
 jest.mock('../../../src/github/client')
 jest.mock('../../../src/notifications/mattermost')
 jest.mock('../../../src/notifications/twitter')
+jest.mock('../../../src/ai/summarizer', () => ({
+  MIN_RELEASE_BODY_CHARS: 20,
+  summarizeReleaseByTag: jest.fn(),
+  summarizeBody: jest.fn(),
+}))
+
+const MOCK_SUMMARIES = {
+  mattermost: '**What changed:**\n• mock bullet',
+  twitter: 'mock tweet #XRPLedger #rippled',
+}
+
+function primeSummarizerMocks(): void {
+  ;(summarizer.summarizeReleaseByTag as jest.Mock).mockResolvedValue(
+    MOCK_SUMMARIES
+  )
+  ;(summarizer.summarizeBody as jest.Mock).mockResolvedValue(MOCK_SUMMARIES)
+}
 
 const logger = winston.createLogger({ silent: true })
 
@@ -23,8 +41,8 @@ const mockConfig: AppConfig = {
   twitterApiSecret: 'secret',
   twitterAccessToken: 'token',
   twitterAccessTokenSecret: 'access-secret',
+  anthropicApiKey: 'test-anthropic-key',
   gcpProjectId: 'test',
-  gcsBucket: 'test-bucket',
 }
 
 const buildInfoContent = 'char const* const versionString = "3.2.0-b4"'
@@ -36,6 +54,7 @@ describe('handlePushEvent', () => {
     )
     ;(mattermost.postToMattermost as jest.Mock).mockResolvedValue(undefined)
     ;(twitter.postToTwitter as jest.Mock).mockResolvedValue(undefined)
+    primeSummarizerMocks()
   })
 
   afterEach(() => jest.resetAllMocks())
@@ -273,6 +292,7 @@ describe('handleReleaseEvent', () => {
   beforeEach(() => {
     ;(mattermost.postToMattermost as jest.Mock).mockResolvedValue(undefined)
     ;(twitter.postToTwitter as jest.Mock).mockResolvedValue(undefined)
+    primeSummarizerMocks()
   })
 
   afterEach(() => jest.resetAllMocks())

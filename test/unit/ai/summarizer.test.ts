@@ -36,15 +36,8 @@ describe('summarizeReleaseByTag', () => {
     ;(Anthropic as unknown as jest.Mock).mockClear()
   })
 
-  it('returns empty summaries when apiKey is missing', async () => {
-    const result = await summarizeReleaseByTag({
-      owner: 'XRPLF',
-      repo: 'rippled',
-      tag: '3.1.3',
-    })
-    expect(result).toEqual({ mattermost: null, twitter: null })
-    expect(mockCreate).not.toHaveBeenCalled()
-  })
+  // apiKey is required by the type signature; missing-key cases fail at
+  // config load time, not here. No runtime test needed for that path.
 
   it('summarizes from GitHub Release body when one exists', async () => {
     mockedClient.fetchReleaseBody.mockResolvedValue(
@@ -138,35 +131,35 @@ describe('summarizeReleaseByTag', () => {
     )
   })
 
-  it('returns empty when no predecessor tag exists', async () => {
+  it('throws when no predecessor tag exists', async () => {
     mockedClient.fetchReleaseBody.mockResolvedValue(null)
     mockedClient.listVersionTags.mockResolvedValue(['3.2.0-b6'])
 
-    const result = await summarizeReleaseByTag({
-      owner: 'XRPLF',
-      repo: 'rippled',
-      tag: '3.2.0-b6',
-      apiKey: 'test-key',
-    })
-
-    expect(result).toEqual({ mattermost: null, twitter: null })
+    await expect(
+      summarizeReleaseByTag({
+        owner: 'XRPLF',
+        repo: 'rippled',
+        tag: '3.2.0-b6',
+        apiKey: 'test-key',
+      })
+    ).rejects.toThrow('No predecessor tag found')
     expect(mockedClient.compareCommits).not.toHaveBeenCalled()
     expect(mockCreate).not.toHaveBeenCalled()
   })
 
-  it('returns empty if compareCommits fails', async () => {
+  it('propagates compareCommits failures', async () => {
     mockedClient.fetchReleaseBody.mockResolvedValue(null)
     mockedClient.listVersionTags.mockResolvedValue(['3.2.0-b5', '3.2.0-b6'])
     mockedClient.compareCommits.mockRejectedValue(new Error('GitHub 500'))
 
-    const result = await summarizeReleaseByTag({
-      owner: 'XRPLF',
-      repo: 'rippled',
-      tag: '3.2.0-b6',
-      apiKey: 'test-key',
-    })
-
-    expect(result).toEqual({ mattermost: null, twitter: null })
+    await expect(
+      summarizeReleaseByTag({
+        owner: 'XRPLF',
+        repo: 'rippled',
+        tag: '3.2.0-b6',
+        apiKey: 'test-key',
+      })
+    ).rejects.toThrow('GitHub 500')
   })
 
   it('filters trivial commits (merges, version bumps, clang-format)', async () => {
@@ -200,7 +193,7 @@ describe('summarizeReleaseByTag', () => {
     expect(sentContent).not.toContain('clang-format')
   })
 
-  it('drops a Twitter summary that exceeds 280 chars', async () => {
+  it('throws when AI returns a tweet over 280 chars', async () => {
     mockedClient.fetchReleaseBody.mockResolvedValue(
       'Long enough release body content here.'
     )
@@ -208,16 +201,14 @@ describe('summarizeReleaseByTag', () => {
     // Simulate Claude ignoring the length limit
     mockCreate.mockReturnValueOnce(aiResponse('x'.repeat(300)))
 
-    const result = await summarizeReleaseByTag({
-      owner: 'XRPLF',
-      repo: 'rippled',
-      tag: '3.1.3',
-      apiKey: 'test-key',
-    })
-
-    expect(result.mattermost).toBeTruthy()
-    // Over-length tweet is rejected so we fall back to the formatter's default
-    expect(result.twitter).toBeNull()
+    await expect(
+      summarizeReleaseByTag({
+        owner: 'XRPLF',
+        repo: 'rippled',
+        tag: '3.1.3',
+        apiKey: 'test-key',
+      })
+    ).rejects.toThrow('AI tweet exceeded')
   })
 
   it('treats blank/short release body as "no body" and falls back to commits', async () => {

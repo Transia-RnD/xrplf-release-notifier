@@ -50,7 +50,6 @@ describe('classifyVersion', () => {
     expect(result.major).toBe(3)
     expect(result.minor).toBe(2)
     expect(result.patch).toBe(0)
-    expect(result.prerelease).toBe('b4')
   })
 
   it('classifies RC versions', () => {
@@ -59,7 +58,6 @@ describe('classifyVersion', () => {
     expect(result.major).toBe(3)
     expect(result.minor).toBe(1)
     expect(result.patch).toBe(0)
-    expect(result.prerelease).toBe('rc1')
   })
 
   it('classifies final release versions', () => {
@@ -68,7 +66,6 @@ describe('classifyVersion', () => {
     expect(result.major).toBe(3)
     expect(result.minor).toBe(1)
     expect(result.patch).toBe(0)
-    expect(result.prerelease).toBeUndefined()
   })
 
   it('throws on unrecognized version format', () => {
@@ -80,6 +77,5 @@ describe('classifyVersion', () => {
   it('handles double-digit prerelease numbers', () => {
     const result = classifyVersion('4.0.0-rc12')
     expect(result.type).toBe(VersionType.RC)
-    expect(result.prerelease).toBe('rc12')
   })
 })
