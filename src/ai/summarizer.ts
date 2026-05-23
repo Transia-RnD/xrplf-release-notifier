@@ -12,6 +12,13 @@ const MODEL = 'claude-haiku-4-5'
 const MAX_TOKENS_MATTERMOST = 1024
 const MAX_TOKENS_TWITTER = 200
 
+/** Twitter's hard limit. Reject AI outputs longer than this. */
+const TWITTER_MAX_CHARS = 280
+/** Don't summarize tiny release bodies — they're usually just placeholders. */
+export const MIN_RELEASE_BODY_CHARS = 20
+/** Cap commits sent to Claude so large diffs don't blow the prompt. */
+const MAX_COMMITS_FOR_SUMMARY = 80
+
 const MATTERMOST_RELEASE_PROMPT = `You summarize rippled release notes for XRPL node operators.
 
 Output 5-10 short bullet points in markdown (using • not -). Rules:
@@ -92,7 +99,7 @@ export async function summarizeReleaseByTag(
     })
   }
 
-  if (body && body.trim().length >= 20) {
+  if (body && body.trim().length >= MIN_RELEASE_BODY_CHARS) {
     return summarizeBody(body, opts.tag, opts.apiKey, opts.logger)
   }
 
@@ -208,7 +215,7 @@ async function summarizeCommitsList(
   const filtered = commits
     .map((c) => ({ ...c, message: c.message.split('\n')[0].trim() }))
     .filter((c) => c.message && !TRIVIAL_COMMIT.test(c.message))
-    .slice(0, 80)
+    .slice(0, MAX_COMMITS_FOR_SUMMARY)
 
   if (filtered.length === 0) {
     return {
@@ -293,7 +300,7 @@ async function runBothPrompts(opts: RunBothOpts): Promise<Summaries> {
 
   return {
     mattermost: mmText ? `${opts.mattermostHeader}\n${mmText}` : null,
-    twitter: twText && twText.length <= 280 ? twText : null,
+    twitter: twText && twText.length <= TWITTER_MAX_CHARS ? twText : null,
   }
 }
 

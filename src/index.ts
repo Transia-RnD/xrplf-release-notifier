@@ -60,7 +60,7 @@ async function start(): Promise<void> {
   app.post(
     '/poll',
     express.json(),
-    asyncHandler((_req, res) => handlePoll(res, config, storage))
+    asyncHandler((req, res) => handlePoll(req, res, config, storage))
   )
 
   app.get('/', (_req, res) => {
@@ -110,10 +110,30 @@ async function handleWebhook(
 }
 
 async function handlePoll(
+  req: Request,
   res: Response,
   config: AppConfig,
   storage: Storage
 ): Promise<void> {
+  // Auth: /poll must only be callable by Cloud Scheduler (or anyone holding
+  // the shared token). If POLLER_TOKEN is unset, the endpoint is open — log
+  // a warning so the misconfiguration is visible, but don't break dev.
+  if (config.pollerToken) {
+    const provided = req.headers['x-cloud-scheduler-token']
+    if (provided !== config.pollerToken) {
+      logger.warn('Unauthorized /poll request', {
+        ip: req.ip,
+        userAgent: req.headers['user-agent'],
+      })
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+  } else {
+    logger.warn(
+      '/poll called without POLLER_TOKEN configured — endpoint is open'
+    )
+  }
+
   const state = await loadPollerState(storage)
   const current = await fetchLatestBinaryVersions()
 

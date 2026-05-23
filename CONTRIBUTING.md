@@ -79,7 +79,19 @@ Then update [README.md](README.md)'s **Notification Scenarios** table and add un
 npm test
 ```
 
-Tests run offline against fixtures in `test/fixtures/`. The AI summarizer is exercised by `scripts/dry-run.ts` against the live GitHub API + Anthropic API (which needs an API key); there are no unit tests that hit Anthropic.
+Tests run offline against fixtures in `test/fixtures/`. The AI summarizer has mocked-Anthropic unit tests in `test/unit/ai/summarizer.test.ts`; for end-to-end checks against live APIs, use `scripts/dry-run.ts` (needs `ANTHROPIC_API_KEY`).
+
+## Lint, format, full check
+
+```bash
+npm run lint          # eslint with --max-warnings 0
+npm run lint:fix      # auto-fix what's mechanical
+npm run format        # prettier --write
+npm run format:check  # prettier --check (use in CI)
+npm run check         # lint + format:check + build + test
+```
+
+The ESLint config uses `@typescript-eslint/recommended-type-checked` + `stylistic-type-checked`, which means lint is type-aware (it reads `tsconfig.eslint.json`). Don't loosen rules without good reason — the strict config has caught several real bugs (unsafe `any` from `JSON.parse`, floating promises in Express handlers).
 
 ## Deploy
 

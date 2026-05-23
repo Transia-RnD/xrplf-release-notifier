@@ -73,9 +73,24 @@ gcloud builds submit --config=cloudbuild.yaml
 ### GCP Resources Required
 
 - **Cloud Run** service
-- **Secret Manager** secret `APP_SECRETS` (JSON blob with all credentials)
+- **Secret Manager** secret `APP_SECRETS` (JSON blob with all credentials, including `POLLER_TOKEN`)
 - **Cloud Storage** bucket for poller state
-- **Cloud Scheduler** job hitting `POST /poll` every 15 minutes
+- **Cloud Scheduler** job hitting `POST /poll` every 15 minutes, with header `X-Cloud-Scheduler-Token: <POLLER_TOKEN>`
+
+### Cloud Scheduler setup
+
+```bash
+POLLER_TOKEN=$(openssl rand -hex 32)
+# Put this same value in APP_SECRETS.POLLER_TOKEN
+gcloud scheduler jobs create http xrplf-release-notifier-poll \
+    --location=us-central1 \
+    --schedule="*/15 * * * *" \
+    --uri="https://<service-url>/poll" \
+    --http-method=POST \
+    --headers="X-Cloud-Scheduler-Token=$POLLER_TOKEN"
+```
+
+If the job already exists, update its headers with `gcloud scheduler jobs update http xrplf-release-notifier-poll --location=us-central1 --update-headers="X-Cloud-Scheduler-Token=$POLLER_TOKEN"`.
 
 ### GitHub App Setup
 

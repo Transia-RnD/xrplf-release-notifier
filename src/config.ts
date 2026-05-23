@@ -10,6 +10,7 @@ export interface AppConfig {
   twitterAccessToken: string
   twitterAccessTokenSecret: string
   anthropicApiKey?: string
+  pollerToken?: string
   gcpProjectId: string
   gcsBucket: string
 }
@@ -23,6 +24,7 @@ interface AppSecrets {
   TWITTER_ACCESS_TOKEN: string
   TWITTER_ACCESS_TOKEN_SECRET: string
   ANTHROPIC_API_KEY?: string
+  POLLER_TOKEN?: string
 }
 
 export async function loadConfig(): Promise<AppConfig> {
@@ -44,6 +46,7 @@ export async function loadConfig(): Promise<AppConfig> {
     twitterAccessToken: process.env.TWITTER_ACCESS_TOKEN ?? '',
     twitterAccessTokenSecret: process.env.TWITTER_ACCESS_TOKEN_SECRET ?? '',
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+    pollerToken: process.env.POLLER_TOKEN,
     gcpProjectId,
     gcsBucket,
   }
@@ -74,6 +77,7 @@ async function loadFromSecretManager(
     twitterAccessToken: secrets.TWITTER_ACCESS_TOKEN,
     twitterAccessTokenSecret: secrets.TWITTER_ACCESS_TOKEN_SECRET,
     anthropicApiKey: secrets.ANTHROPIC_API_KEY,
+    pollerToken: secrets.POLLER_TOKEN,
     gcpProjectId,
     gcsBucket,
   }

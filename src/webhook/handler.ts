@@ -8,8 +8,18 @@ import type { MattermostPayload } from '../notifications/mattermost'
 import { postToMattermost } from '../notifications/mattermost'
 import { postToTwitter } from '../notifications/twitter'
 import type { Summaries } from '../ai/summarizer'
-import { summarizeReleaseByTag, summarizeBody } from '../ai/summarizer'
+import {
+  summarizeReleaseByTag,
+  summarizeBody,
+  MIN_RELEASE_BODY_CHARS,
+} from '../ai/summarizer'
 import type { AppConfig } from '../config'
+import {
+  PushEventSchema,
+  ReleaseEventSchema,
+  type PushEvent,
+  type ReleaseEvent,
+} from './schemas'
 
 const WATCHED_FILE = 'src/libxrpl/protocol/BuildInfo.cpp'
 const BRANCH_REGEX = /^refs\/heads\/(develop|release-\d+\.\d+)$/
@@ -25,11 +35,20 @@ export interface HandlerResult {
 }
 
 export async function handlePushEvent(
-  payload: Record<string, unknown>,
+  rawPayload: Record<string, unknown>,
   config: AppConfig,
   logger: Logger
 ): Promise<HandlerResult> {
-  const ref = payload.ref as string | undefined
+  const parsed = PushEventSchema.safeParse(rawPayload)
+  if (!parsed.success) {
+    logger.warn('Push payload failed schema validation', {
+      issues: parsed.error.issues.slice(0, 3),
+    })
+    return { action: 'ignored', reason: 'invalid push payload' }
+  }
+  const payload = parsed.data
+
+  const ref = payload.ref
   if (!ref) {
     return { action: 'ignored', reason: 'missing ref' }
   }
@@ -48,15 +67,11 @@ export async function handlePushEvent(
 
 async function handleBranchPush(
   branch: string,
-  payload: Record<string, unknown>,
+  payload: PushEvent,
   config: AppConfig,
   logger: Logger
 ): Promise<HandlerResult> {
-  const commits = payload.commits as {
-    added?: string[]
-    modified?: string[]
-  }[]
-  const fileModified = commits?.some(
+  const fileModified = payload.commits?.some(
     (c) =>
       Boolean(c.added?.includes(WATCHED_FILE)) ||
       Boolean(c.modified?.includes(WATCHED_FILE))
@@ -65,7 +80,7 @@ async function handleBranchPush(
     return { action: 'ignored', reason: 'BuildInfo.cpp not modified' }
   }
 
-  const sha = payload.after as string
+  const sha = payload.after ?? ''
   let content: string
   try {
     content = await fetchFileContent(
@@ -120,7 +135,7 @@ async function handleBranchPush(
 
 async function handleTagPush(
   tagName: string,
-  payload: Record<string, unknown>,
+  payload: PushEvent,
   config: AppConfig,
   logger: Logger
 ): Promise<HandlerResult> {
@@ -135,10 +150,8 @@ async function handleTagPush(
     return { action: 'ignored', reason: 'tag does not match version pattern' }
   }
 
-  const headCommit = payload.head_commit as
-    | { id?: string; url?: string }
-    | undefined
-  const sha = headCommit?.id ?? (payload.after as string) ?? ''
+  const headCommit = payload.head_commit
+  const sha = headCommit?.id ?? payload.after ?? ''
   const commitUrl =
     headCommit?.url ??
     (sha ? `https://github.com/XRPLF/rippled/commit/${sha}` : '')
@@ -171,24 +184,24 @@ async function handleTagPush(
 }
 
 export async function handleReleaseEvent(
-  payload: Record<string, unknown>,
+  rawPayload: Record<string, unknown>,
   config: AppConfig,
   logger: Logger
 ): Promise<HandlerResult> {
-  const action = payload.action as string | undefined
-  if (action !== 'published') {
-    return { action: 'ignored', reason: `release action: ${action}` }
+  const parsed = ReleaseEventSchema.safeParse(rawPayload)
+  if (!parsed.success) {
+    logger.warn('Release payload failed schema validation', {
+      issues: parsed.error.issues.slice(0, 3),
+    })
+    return { action: 'ignored', reason: 'invalid release payload' }
+  }
+  const payload: ReleaseEvent = parsed.data
+
+  if (payload.action !== 'published') {
+    return { action: 'ignored', reason: `release action: ${payload.action}` }
   }
 
-  const release = payload.release as
-    | {
-        tag_name?: string
-        html_url?: string
-        draft?: boolean
-        prerelease?: boolean
-      }
-    | undefined
-
+  const release = payload.release
   if (!release || release.draft) {
     return { action: 'ignored', reason: 'draft or missing release' }
   }
@@ -215,12 +228,12 @@ export async function handleReleaseEvent(
     commitUrl: release.html_url ?? '',
   }
 
-  const releaseBody = (payload.release as { body?: string } | undefined)?.body
+  const releaseBody = release.body
   let summaries: Summaries = { mattermost: null, twitter: null }
   if (
     config.anthropicApiKey &&
     releaseBody &&
-    releaseBody.trim().length >= 20
+    releaseBody.trim().length >= MIN_RELEASE_BODY_CHARS
   ) {
     summaries = await summarizeBody(
       releaseBody,
