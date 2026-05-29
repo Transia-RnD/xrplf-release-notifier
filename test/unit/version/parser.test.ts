@@ -1,47 +1,5 @@
-import fs from 'fs'
-import path from 'path'
-import {
-  parseVersionFromContent,
-  classifyVersion,
-} from '../../../src/version/parser'
+import { classifyVersion } from '../../../src/version/parser'
 import { VersionType } from '../../../src/version/types'
-
-const fixturesDir = path.join(__dirname, '../../fixtures')
-
-describe('parseVersionFromContent', () => {
-  it('extracts beta version from full BuildInfo.cpp content', () => {
-    const content = fs.readFileSync(
-      path.join(fixturesDir, 'buildinfo-beta.txt'),
-      'utf-8'
-    )
-    expect(parseVersionFromContent(content)).toBe('3.2.0-b4')
-  })
-
-  it('extracts RC version', () => {
-    const content = fs.readFileSync(
-      path.join(fixturesDir, 'buildinfo-rc.txt'),
-      'utf-8'
-    )
-    expect(parseVersionFromContent(content)).toBe('3.1.0-rc1')
-  })
-
-  it('extracts final release version', () => {
-    const content = fs.readFileSync(
-      path.join(fixturesDir, 'buildinfo-final.txt'),
-      'utf-8'
-    )
-    expect(parseVersionFromContent(content)).toBe('3.1.0')
-  })
-
-  it('returns null for content without version string', () => {
-    expect(parseVersionFromContent('no version here')).toBeNull()
-  })
-
-  it('handles inline version without NOLINTNEXTLINE', () => {
-    const content = 'char const* const versionString = "2.0.0-b1";'
-    expect(parseVersionFromContent(content)).toBe('2.0.0-b1')
-  })
-})
 
 describe('classifyVersion', () => {
   it('classifies beta versions', () => {

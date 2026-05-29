@@ -13,6 +13,10 @@ const Commit = z.object({
   modified: z.array(z.string()).optional(),
 })
 
+const Repository = z.object({
+  full_name: z.string().optional(),
+})
+
 export const PushEventSchema = z.object({
   ref: z.string().optional(),
   after: z.string().optional(),
@@ -25,6 +29,7 @@ export const PushEventSchema = z.object({
     })
     .nullable()
     .optional(),
+  repository: Repository.optional(),
 })
 export type PushEvent = z.infer<typeof PushEventSchema>
 
@@ -38,5 +43,6 @@ export const ReleaseEventSchema = z.object({
       draft: z.boolean().optional(),
     })
     .optional(),
+  repository: Repository.optional(),
 })
 export type ReleaseEvent = z.infer<typeof ReleaseEventSchema>

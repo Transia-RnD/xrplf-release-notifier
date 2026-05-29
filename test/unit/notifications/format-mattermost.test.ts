@@ -22,57 +22,6 @@ function mmText(payload: { attachments?: unknown[] }): string {
   return JSON.stringify(payload)
 }
 
-describe('formatMattermost (webhook)', () => {
-  it('beta source bump uses test-tube emoji and beta color', () => {
-    const payload = formatMattermost(
-      makeVersion({
-        raw: '3.2.0-b4',
-        type: VersionType.BETA,
-        branch: 'develop',
-      }),
-      NotificationSource.WEBHOOK,
-      SUMMARY
-    )
-    const text = mmText(payload)
-    expect(text).toContain(':test_tube:')
-    expect(text).toContain('3.2.0-b4')
-    expect(text).toContain('develop')
-    expect(payload.attachments?.[0]?.color).toBe('#3F51B5')
-  })
-
-  it('RC source bump uses rocket emoji and RC color', () => {
-    const payload = formatMattermost(
-      makeVersion({
-        raw: '3.1.0-rc1',
-        type: VersionType.RC,
-        branch: 'release-3.1',
-      }),
-      NotificationSource.WEBHOOK,
-      SUMMARY
-    )
-    const text = mmText(payload)
-    expect(text).toContain(':rocket:')
-    expect(text).toContain('release candidate')
-    expect(payload.attachments?.[0]?.color).toBe('#FF9800')
-  })
-
-  it('final source bump uses tada emoji and final color', () => {
-    const payload = formatMattermost(
-      makeVersion({
-        raw: '3.1.0',
-        type: VersionType.FINAL,
-        branch: 'release-3.1',
-      }),
-      NotificationSource.WEBHOOK,
-      SUMMARY
-    )
-    const text = mmText(payload)
-    expect(text).toContain(':tada:')
-    expect(text).toContain('finalized')
-    expect(payload.attachments?.[0]?.color).toBe('#4CAF50')
-  })
-})
-
 describe('formatMattermost (binary poll)', () => {
   it('includes install commands for the exact version', () => {
     const payload = formatMattermost(
@@ -164,9 +113,9 @@ describe('formatMattermost summary appending', () => {
       makeVersion({
         raw: '3.2.0-b4',
         type: VersionType.BETA,
-        branch: 'develop',
+        branch: `tag:3.2.0-b4`,
       }),
-      NotificationSource.WEBHOOK,
+      NotificationSource.TAG,
       '**Changes:**\n• Only this bullet'
     )
     expect(payload.attachments?.[0]?.text).toBe(
@@ -179,7 +128,6 @@ describe('formatMattermost attachment metadata', () => {
   it('all sources include footer and ts', () => {
     const version = makeVersion({ raw: '3.1.0', type: VersionType.FINAL })
     const sources = [
-      NotificationSource.WEBHOOK,
       NotificationSource.BINARY_POLL,
       NotificationSource.TAG,
       NotificationSource.RELEASE,
@@ -191,18 +139,18 @@ describe('formatMattermost attachment metadata', () => {
     }
   })
 
-  it('webhook attachment links the commit URL', () => {
+  it('release-published attachment links the release URL', () => {
     const payload = formatMattermost(
       makeVersion({
         raw: '3.1.0',
         type: VersionType.FINAL,
-        commitUrl: 'https://github.com/XRPLF/rippled/commit/abc123',
+        commitUrl: 'https://github.com/XRPLF/rippled/releases/tag/3.1.0',
       }),
-      NotificationSource.WEBHOOK,
+      NotificationSource.RELEASE,
       SUMMARY
     )
     expect(payload.attachments?.[0]?.title_link).toBe(
-      'https://github.com/XRPLF/rippled/commit/abc123'
+      'https://github.com/XRPLF/rippled/releases/tag/3.1.0'
     )
   })
 })

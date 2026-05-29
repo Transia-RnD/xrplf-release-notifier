@@ -1,6 +1,8 @@
 import axios from 'axios'
 import type { VersionInfo } from '../version/types'
 import { VersionType, NotificationSource } from '../version/types'
+import type { RepoConfig } from '../github/repos'
+import { PUBLIC_REPO, repoFullName } from '../github/repos'
 
 export interface MattermostAttachment {
   fallback: string
@@ -24,10 +26,10 @@ const USERNAME = 'rippled releases'
 const ICON_URL = 'https://eotjzkw.dlvr.cloud/pasted_2.png'
 const FOOTER = 'xrplf-release-notifier'
 
-const COLOR_BETA = '#3F51B5'
 const COLOR_RC = '#FF9800'
 const COLOR_FINAL = '#4CAF50'
 const COLOR_TAG = '#2196F3'
+const COLOR_HEADSUP = '#9E9E9E'
 
 /**
  * Build the Mattermost payload for a notification event and append the
@@ -36,18 +38,17 @@ const COLOR_TAG = '#2196F3'
 export function formatMattermost(
   version: VersionInfo,
   source: NotificationSource,
-  summaryMarkdown: string
+  summaryMarkdown: string,
+  repo: RepoConfig = PUBLIC_REPO
 ): MattermostPayload {
   const payload = (() => {
     switch (source) {
       case NotificationSource.BINARY_POLL:
         return binaryPayload(version)
       case NotificationSource.TAG:
-        return tagPayload(version)
+        return tagPayload(version, repo)
       case NotificationSource.RELEASE:
         return releasePayload(version)
-      case NotificationSource.WEBHOOK:
-        return webhookPayload(version)
     }
   })()
 
@@ -56,6 +57,49 @@ export function formatMattermost(
     const existing = att.text ? `${att.text}\n\n` : ''
     att.text = `${existing}${summaryMarkdown}`
   }
+  return payload
+}
+
+/**
+ * Heads-up posted when a tag is pushed on the private mirror but no curated
+ * release notes exist (BETA tags only — RC/FINAL tags are covered by the
+ * private release-event path below). Carries no body and no link — we have
+ * nothing more than the version + SHA from the webhook payload, and a link
+ * to the private repo would 404 for most Mattermost readers.
+ */
+export function formatMattermostPrivateTagHeadsUp(
+  version: VersionInfo,
+  repo: RepoConfig
+): MattermostPayload {
+  const shaSuffix = version.commitSha
+    ? ` (\`${version.commitSha.slice(0, 7)}\`)`
+    : ''
+  return envelope({
+    fallback: `rippled ${version.raw} tag pushed to ${repoFullName(repo)}`,
+    color: COLOR_HEADSUP,
+    pretext: `:lock: rippled \`${version.raw}\` tagged on \`${repoFullName(repo)}\`${shaSuffix} — public mirror expected to follow.`,
+  })
+}
+
+/**
+ * Heads-up posted when a release is published on the private mirror. Uses
+ * the AI-summarized release body that already came in the webhook payload
+ * — no GitHub API call is made, so no broken-token risk and no leak of
+ * anything we don't already have. The summary still goes through Claude
+ * for consistency with the public copy.
+ */
+export function formatMattermostPrivateReleaseHeadsUp(
+  version: VersionInfo,
+  repo: RepoConfig,
+  summaryMarkdown: string
+): MattermostPayload {
+  const payload = envelope({
+    fallback: `rippled ${version.raw} released on ${repoFullName(repo)}`,
+    color: COLOR_HEADSUP,
+    pretext: `:lock: rippled \`${version.raw}\` released on \`${repoFullName(repo)}\` — public mirror expected to follow.`,
+  })
+  const att = payload.attachments?.[0]
+  if (att) att.text = summaryMarkdown
   return payload
 }
 
@@ -85,37 +129,6 @@ function envelope(
   }
 }
 
-function webhookPayload(version: VersionInfo): MattermostPayload {
-  switch (version.type) {
-    case VersionType.BETA:
-      return envelope({
-        fallback: `rippled ${version.raw} (beta) version bumped on ${version.branch}`,
-        color: COLOR_BETA,
-        pretext: `:test_tube: rippled \`${version.raw}\` (beta) version bumped on \`${version.branch}\`.`,
-        title: 'View commit',
-        title_link: version.commitUrl,
-      })
-    case VersionType.RC:
-      return envelope({
-        fallback: `rippled ${version.raw} release candidate available on ${version.branch}`,
-        color: COLOR_RC,
-        pretext: `:rocket: rippled \`${version.raw}\` release candidate is now available on \`${version.branch}\`.`,
-        text: 'Operators: please begin testing.',
-        title: 'View commit',
-        title_link: version.commitUrl,
-      })
-    case VersionType.FINAL:
-      return envelope({
-        fallback: `rippled ${version.raw} version finalized on ${version.branch}`,
-        color: COLOR_FINAL,
-        pretext: `:tada: rippled \`${version.raw}\` version finalized on \`${version.branch}\` — release expected soon.`,
-        text: 'A GitHub Release and binary packages will follow.',
-        title: 'View commit',
-        title_link: version.commitUrl,
-      })
-  }
-}
-
 function binaryPayload(version: VersionInfo): MattermostPayload {
   return envelope({
     fallback: `rippled ${version.raw} binary packages available on repos.ripple.com`,
@@ -130,11 +143,11 @@ function binaryPayload(version: VersionInfo): MattermostPayload {
   })
 }
 
-function tagPayload(version: VersionInfo): MattermostPayload {
+function tagPayload(version: VersionInfo, repo: RepoConfig): MattermostPayload {
   return envelope({
     fallback: `rippled ${version.raw} tag pushed`,
     color: COLOR_TAG,
-    pretext: `:label: rippled \`${version.raw}\` tag has been pushed to \`XRPLF/rippled\`.`,
+    pretext: `:label: rippled \`${version.raw}\` tag has been pushed to \`${repoFullName(repo)}\`.`,
     title: 'View commit',
     title_link: version.commitUrl,
   })

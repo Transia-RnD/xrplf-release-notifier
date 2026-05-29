@@ -1,13 +1,6 @@
 import { VersionType } from './types'
 
-const VERSION_REGEX = /char\s+const\*\s+const\s+versionString\s*=\s*"([^"]+)"/
-
 const VERSION_PARTS = /^(\d+)\.(\d+)\.(\d+)(?:-(b|rc)(\d+))?$/
-
-export function parseVersionFromContent(content: string): string | null {
-  const match = content.match(VERSION_REGEX)
-  return match ? match[1] : null
-}
 
 export function classifyVersion(raw: string) {
   const m = raw.match(VERSION_PARTS)

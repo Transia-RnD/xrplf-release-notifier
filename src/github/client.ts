@@ -2,25 +2,6 @@ import axios from 'axios'
 
 const GITHUB_API = 'https://api.github.com'
 
-export async function fetchFileContent(
-  owner: string,
-  repo: string,
-  filePath: string,
-  ref: string,
-  token?: string
-): Promise<string> {
-  const url = `${GITHUB_API}/repos/${owner}/${repo}/contents/${filePath}?ref=${ref}`
-  const headers: Record<string, string> = {
-    Accept: 'application/vnd.github.raw+json',
-    'User-Agent': 'xrplf-release-notifier',
-  }
-  if (token) {
-    headers.Authorization = `Bearer ${token}`
-  }
-  const response = await axios.get<string>(url, { headers })
-  return response.data
-}
-
 export async function fetchReleaseBody(
   owner: string,
   repo: string,

@@ -45,6 +45,12 @@ interface ScenarioRender {
   versionInfo: VersionInfo
 }
 
+/**
+ * Only renders the scenarios that actually post for the given version type.
+ * - BETA → tag push only (no GitHub Release, no stable binary)
+ * - RC → release published only (tag suppressed, no stable binary)
+ * - FINAL → release published + binary poll (tag suppressed)
+ */
 function buildScenarios(
   version: ReturnType<typeof classifyVersion>
 ): ScenarioRender[] {
@@ -52,33 +58,22 @@ function buildScenarios(
   const commitUrl = `https://github.com/${OWNER}/${REPO}/commit/example`
   const releaseUrl = `https://github.com/${OWNER}/${REPO}/releases/tag/${tag}`
 
-  // Pick the "BuildInfo bump" scenario by version type
-  const sourceBumpBranch =
-    version.type === VersionType.BETA
-      ? 'develop'
-      : `release-${version.major}.${version.minor}`
+  if (version.type === VersionType.BETA) {
+    return [
+      {
+        scenario: `Tag push — refs/tags/${tag} pushed`,
+        source: NotificationSource.TAG,
+        versionInfo: {
+          ...version,
+          branch: `tag:${tag}`,
+          commitSha: 'example',
+          commitUrl,
+        },
+      },
+    ]
+  }
 
-  return [
-    {
-      scenario: `Source bump (${version.type}) — push to ${sourceBumpBranch} modifying BuildInfo.cpp`,
-      source: NotificationSource.WEBHOOK,
-      versionInfo: {
-        ...version,
-        branch: sourceBumpBranch,
-        commitSha: 'example',
-        commitUrl,
-      },
-    },
-    {
-      scenario: `Tag push — refs/tags/${tag} pushed`,
-      source: NotificationSource.TAG,
-      versionInfo: {
-        ...version,
-        branch: `tag:${tag}`,
-        commitSha: 'example',
-        commitUrl,
-      },
-    },
+  const scenarios: ScenarioRender[] = [
     {
       scenario: `Release published — GitHub Release for ${tag} (action=published)`,
       source: NotificationSource.RELEASE,
@@ -89,7 +84,9 @@ function buildScenarios(
         commitUrl: releaseUrl,
       },
     },
-    {
+  ]
+  if (version.type === VersionType.FINAL) {
+    scenarios.push({
       scenario: `Binary poll — new .deb/.rpm for ${tag} on repos.ripple.com`,
       source: NotificationSource.BINARY_POLL,
       versionInfo: {
@@ -98,8 +95,9 @@ function buildScenarios(
         commitSha: '',
         commitUrl: '',
       },
-    },
-  ]
+    })
+  }
+  return scenarios
 }
 
 function renderScenario(s: ScenarioRender, summaries: Summaries) {

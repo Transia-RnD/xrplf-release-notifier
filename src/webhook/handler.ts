@@ -1,10 +1,15 @@
 import type { Logger } from 'winston'
-import { fetchFileContent } from '../github/client'
-import { parseVersionFromContent, classifyVersion } from '../version/parser'
+import type { Storage } from '@google-cloud/storage'
+import { classifyVersion } from '../version/parser'
 import type { VersionInfo } from '../version/types'
-import { NotificationSource } from '../version/types'
+import { NotificationSource, VersionType } from '../version/types'
 import type { MattermostPayload } from '../notifications/mattermost'
-import { formatMattermost, postToMattermost } from '../notifications/mattermost'
+import {
+  formatMattermost,
+  formatMattermostPrivateTagHeadsUp,
+  formatMattermostPrivateReleaseHeadsUp,
+  postToMattermost,
+} from '../notifications/mattermost'
 import { postToTwitter } from '../notifications/twitter'
 import {
   summarizeReleaseByTag,
@@ -12,6 +17,9 @@ import {
   MIN_RELEASE_BODY_CHARS,
 } from '../ai/summarizer'
 import type { AppConfig } from '../config'
+import type { RepoConfig } from '../github/repos'
+import { findRepoByFullName, repoFullName } from '../github/repos'
+import { tryClaim, type DedupScenario } from '../dedup/store'
 import {
   PushEventSchema,
   ReleaseEventSchema,
@@ -19,8 +27,6 @@ import {
   type ReleaseEvent,
 } from './schemas'
 
-const WATCHED_FILE = 'src/libxrpl/protocol/BuildInfo.cpp'
-const BRANCH_REGEX = /^refs\/heads\/(develop|release-\d+\.\d+)$/
 const TAG_REGEX = /^refs\/tags\/v?(.+)$/
 
 export interface HandlerResult {
@@ -30,21 +36,32 @@ export interface HandlerResult {
   type?: string
   branch?: string
   source?: string
+  repo?: string
+}
+
+export interface HandlerDeps {
+  config: AppConfig
+  storage: Storage
+  logger: Logger
 }
 
 export async function handlePushEvent(
   rawPayload: Record<string, unknown>,
-  config: AppConfig,
-  logger: Logger
+  deps: HandlerDeps
 ): Promise<HandlerResult> {
   const parsed = PushEventSchema.safeParse(rawPayload)
   if (!parsed.success) {
-    logger.warn('Push payload failed schema validation', {
+    deps.logger.warn('Push payload failed schema validation', {
       issues: parsed.error.issues.slice(0, 3),
     })
     return { action: 'ignored', reason: 'invalid push payload' }
   }
   const payload = parsed.data
+
+  const repo = resolveRepo(payload.repository?.full_name, deps.logger)
+  if (!repo) {
+    return { action: 'ignored', reason: 'unknown repository' }
+  }
 
   const ref = payload.ref
   if (!ref) {
@@ -53,95 +70,16 @@ export async function handlePushEvent(
 
   const tagMatch = ref.match(TAG_REGEX)
   if (tagMatch) {
-    return handleTagPush(tagMatch[1], payload, config, logger)
+    return handleTagPush(tagMatch[1], payload, repo, deps)
   }
-
-  const branchMatch = ref.match(BRANCH_REGEX)
-  if (!branchMatch) {
-    return { action: 'ignored', reason: 'branch not watched' }
-  }
-  return handleBranchPush(branchMatch[1], payload, config, logger)
-}
-
-async function handleBranchPush(
-  branch: string,
-  payload: PushEvent,
-  config: AppConfig,
-  logger: Logger
-): Promise<HandlerResult> {
-  const fileModified = payload.commits?.some(
-    (c) =>
-      Boolean(c.added?.includes(WATCHED_FILE)) ||
-      Boolean(c.modified?.includes(WATCHED_FILE))
-  )
-  if (!fileModified) {
-    return { action: 'ignored', reason: 'BuildInfo.cpp not modified' }
-  }
-
-  const sha = payload.after ?? ''
-  let content: string
-  try {
-    content = await fetchFileContent(
-      'XRPLF',
-      'rippled',
-      WATCHED_FILE,
-      sha,
-      config.githubToken
-    )
-  } catch (err) {
-    logger.error('Failed to fetch BuildInfo.cpp', { error: err })
-    throw err
-  }
-
-  const raw = parseVersionFromContent(content)
-  if (!raw) {
-    return { action: 'error', reason: 'Could not parse version string' }
-  }
-
-  const classified = classifyVersion(raw)
-  const versionInfo: VersionInfo = {
-    ...classified,
-    branch,
-    commitSha: sha,
-    commitUrl: `https://github.com/XRPLF/rippled/commit/${sha}`,
-  }
-
-  const summary = await summarizeReleaseByTag({
-    owner: 'XRPLF',
-    repo: 'rippled',
-    tag: raw,
-    apiKey: config.anthropicApiKey,
-    githubToken: config.githubToken,
-    logger,
-  })
-
-  await sendNotifications(
-    {
-      mattermost: formatMattermost(
-        versionInfo,
-        NotificationSource.WEBHOOK,
-        summary.mattermost
-      ),
-      twitter: summary.twitter,
-    },
-    config,
-    logger
-  )
-
-  return {
-    action: 'notified',
-    version: raw,
-    type: versionInfo.type,
-    branch,
-    source: 'branch',
-  }
+  return { action: 'ignored', reason: 'branch pushes do not notify' }
 }
 
 async function handleTagPush(
   tagName: string,
   payload: PushEvent,
-  config: AppConfig,
-  logger: Logger
+  repo: RepoConfig,
+  deps: HandlerDeps
 ): Promise<HandlerResult> {
   if (payload.deleted === true) {
     return { action: 'ignored', reason: 'tag deletion' }
@@ -154,11 +92,20 @@ async function handleTagPush(
     return { action: 'ignored', reason: 'tag does not match version pattern' }
   }
 
+  // Tag push only notifies for betas — RCs and finals are announced via the
+  // GitHub Release event instead, which has actual release notes.
+  if (classified.type !== VersionType.BETA) {
+    return {
+      action: 'ignored',
+      reason: `tag push for ${classified.type} — release event will notify instead`,
+    }
+  }
+
   const headCommit = payload.head_commit
   const sha = headCommit?.id ?? payload.after ?? ''
   const commitUrl =
     headCommit?.url ??
-    (sha ? `https://github.com/XRPLF/rippled/commit/${sha}` : '')
+    (sha ? `https://github.com/${repoFullName(repo)}/commit/${sha}` : '')
 
   const versionInfo: VersionInfo = {
     ...classified,
@@ -167,13 +114,35 @@ async function handleTagPush(
     commitUrl,
   }
 
+  if (repo.visibility === 'private') {
+    // No API calls — beta pushes have no curated notes anywhere, and a
+    // commit-compare against the private repo would require a working
+    // token and would expose commit messages we may not want to leak.
+    // Just announce the bare fact that progress is happening.
+    await sendNotifications(
+      {
+        mattermost: formatMattermostPrivateTagHeadsUp(versionInfo, repo),
+        twitter: '',
+      },
+      { scenario: 'tag-private', version: classified.raw, repo },
+      deps
+    )
+    return {
+      action: 'notified',
+      version: classified.raw,
+      type: classified.type,
+      source: 'tag-private',
+      repo: repoFullName(repo),
+    }
+  }
+
   const summary = await summarizeReleaseByTag({
-    owner: 'XRPLF',
-    repo: 'rippled',
+    owner: repo.owner,
+    repo: repo.name,
     tag: tagName,
-    apiKey: config.anthropicApiKey,
-    githubToken: config.githubToken,
-    logger,
+    apiKey: deps.config.anthropicApiKey,
+    githubToken: deps.config.githubToken,
+    logger: deps.logger,
   })
 
   await sendNotifications(
@@ -181,12 +150,17 @@ async function handleTagPush(
       mattermost: formatMattermost(
         versionInfo,
         NotificationSource.TAG,
-        summary.mattermost
+        summary.mattermost,
+        repo
       ),
       twitter: summary.twitter,
     },
-    config,
-    logger
+    {
+      scenario: 'tag',
+      version: classified.raw,
+      repo,
+    },
+    deps
   )
 
   return {
@@ -194,22 +168,27 @@ async function handleTagPush(
     version: classified.raw,
     type: classified.type,
     source: 'tag',
+    repo: repoFullName(repo),
   }
 }
 
 export async function handleReleaseEvent(
   rawPayload: Record<string, unknown>,
-  config: AppConfig,
-  logger: Logger
+  deps: HandlerDeps
 ): Promise<HandlerResult> {
   const parsed = ReleaseEventSchema.safeParse(rawPayload)
   if (!parsed.success) {
-    logger.warn('Release payload failed schema validation', {
+    deps.logger.warn('Release payload failed schema validation', {
       issues: parsed.error.issues.slice(0, 3),
     })
     return { action: 'ignored', reason: 'invalid release payload' }
   }
   const payload: ReleaseEvent = parsed.data
+
+  const repo = resolveRepo(payload.repository?.full_name, deps.logger)
+  if (!repo) {
+    return { action: 'ignored', reason: 'unknown repository' }
+  }
 
   if (payload.action !== 'published') {
     return { action: 'ignored', reason: `release action: ${payload.action}` }
@@ -243,21 +222,61 @@ export async function handleReleaseEvent(
   }
 
   const releaseBody = release.body
+
+  if (repo.visibility === 'private') {
+    // Private path: only use what's already in the webhook payload — no
+    // GitHub API calls. If the body is missing/too short, fall back to a
+    // bare heads-up rather than reaching for the commit-compare API.
+    let bodyMarkdown: string
+    if (releaseBody && releaseBody.trim().length >= MIN_RELEASE_BODY_CHARS) {
+      const summaries = await summarizeBody(
+        releaseBody,
+        tagName,
+        deps.config.anthropicApiKey,
+        deps.logger
+      )
+      bodyMarkdown = summaries.mattermost
+    } else {
+      bodyMarkdown = '_No release notes in webhook payload._'
+    }
+
+    await sendNotifications(
+      {
+        mattermost: formatMattermostPrivateReleaseHeadsUp(
+          versionInfo,
+          repo,
+          bodyMarkdown
+        ),
+        twitter: '',
+      },
+      { scenario: 'release-private', version: classified.raw, repo },
+      deps
+    )
+
+    return {
+      action: 'notified',
+      version: classified.raw,
+      type: classified.type,
+      source: 'release-private',
+      repo: repoFullName(repo),
+    }
+  }
+
   const summaries =
     releaseBody && releaseBody.trim().length >= MIN_RELEASE_BODY_CHARS
       ? await summarizeBody(
           releaseBody,
           tagName,
-          config.anthropicApiKey,
-          logger
+          deps.config.anthropicApiKey,
+          deps.logger
         )
       : await summarizeReleaseByTag({
-          owner: 'XRPLF',
-          repo: 'rippled',
+          owner: repo.owner,
+          repo: repo.name,
           tag: tagName,
-          apiKey: config.anthropicApiKey,
-          githubToken: config.githubToken,
-          logger,
+          apiKey: deps.config.anthropicApiKey,
+          githubToken: deps.config.githubToken,
+          logger: deps.logger,
         })
 
   await sendNotifications(
@@ -265,12 +284,17 @@ export async function handleReleaseEvent(
       mattermost: formatMattermost(
         versionInfo,
         NotificationSource.RELEASE,
-        summaries.mattermost
+        summaries.mattermost,
+        repo
       ),
       twitter: summaries.twitter,
     },
-    config,
-    logger
+    {
+      scenario: 'release',
+      version: classified.raw,
+      repo,
+    },
+    deps
   )
 
   return {
@@ -278,7 +302,24 @@ export async function handleReleaseEvent(
     version: classified.raw,
     type: classified.type,
     source: 'release',
+    repo: repoFullName(repo),
   }
+}
+
+function resolveRepo(
+  fullName: string | undefined,
+  logger: Logger
+): RepoConfig | undefined {
+  if (!fullName) {
+    logger.warn('Webhook payload missing repository.full_name')
+    return undefined
+  }
+  const repo = findRepoByFullName(fullName)
+  if (!repo) {
+    logger.warn('Webhook from unknown repository', { fullName })
+    return undefined
+  }
+  return repo
 }
 
 /**
@@ -295,38 +336,97 @@ function twitterConfigured(config: AppConfig): boolean {
   )
 }
 
+export interface NotificationContext {
+  scenario: DedupScenario
+  version: string
+  repo: RepoConfig
+}
+
+/**
+ * Dispatch Mattermost and Twitter notifications independently, each gated by
+ * a per-channel dedup claim. The first webhook (public or private repo) to
+ * land for a given (channel, scenario, version) wins. Twitter is skipped
+ * entirely for private-repo events so embargoed releases don't leak.
+ */
 export async function sendNotifications(
   messages: { mattermost: MattermostPayload; twitter: string },
-  config: AppConfig,
-  logger: Logger
+  ctx: NotificationContext,
+  deps: HandlerDeps
 ): Promise<void> {
-  const targets: { name: string; call: () => Promise<void> }[] = [
-    {
+  const { config, storage, logger } = deps
+  const fullName = repoFullName(ctx.repo)
+
+  interface Target {
+    name: string
+    call: () => Promise<void>
+  }
+  const targets: Target[] = []
+
+  const mattermostClaimed = await tryClaim(
+    storage,
+    'mattermost',
+    ctx.scenario,
+    ctx.version,
+    fullName
+  )
+  if (mattermostClaimed) {
+    targets.push({
       name: 'Mattermost',
       call: () =>
         postToMattermost(config.mattermostWebhookUrl, messages.mattermost),
-    },
-  ]
-
-  if (twitterConfigured(config)) {
-    targets.push({
-      name: 'Twitter',
-      call: () =>
-        postToTwitter(
-          {
-            appKey: config.twitterApiKey,
-            appSecret: config.twitterApiSecret,
-            accessToken: config.twitterAccessToken,
-            accessSecret: config.twitterAccessTokenSecret,
-          },
-          messages.twitter
-        ),
     })
   } else {
+    logger.info('Mattermost notification deduped', {
+      scenario: ctx.scenario,
+      version: ctx.version,
+      repo: fullName,
+    })
+  }
+
+  if (ctx.repo.visibility === 'private') {
+    // Heads-ups for the private mirror never tweet, even if the channel is
+    // configured — public Twitter is for the canonical public-mirror post.
+    logger.info('Skipping Twitter for private-repo heads-up', {
+      scenario: ctx.scenario,
+      version: ctx.version,
+      repo: fullName,
+    })
+  } else if (!twitterConfigured(config)) {
     logger.info('Twitter not configured — skipping post', {
       tweet: messages.twitter,
     })
+  } else {
+    const twitterClaimed = await tryClaim(
+      storage,
+      'twitter',
+      ctx.scenario,
+      ctx.version,
+      fullName
+    )
+    if (twitterClaimed) {
+      targets.push({
+        name: 'Twitter',
+        call: () =>
+          postToTwitter(
+            {
+              appKey: config.twitterApiKey,
+              appSecret: config.twitterApiSecret,
+              accessToken: config.twitterAccessToken,
+              accessSecret: config.twitterAccessTokenSecret,
+            },
+            messages.twitter
+          ),
+      })
+    } else {
+      logger.info('Twitter notification deduped', {
+        scenario: ctx.scenario,
+        version: ctx.version,
+        repo: fullName,
+      })
+    }
   }
+
+  if (targets.length === 0) return
 
   const results = await Promise.allSettled(targets.map((t) => t.call()))
   results.forEach((r, i) => {

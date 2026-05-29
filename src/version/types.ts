@@ -16,7 +16,6 @@ export interface VersionInfo {
 }
 
 export enum NotificationSource {
-  WEBHOOK = 'webhook',
   BINARY_POLL = 'binary_poll',
   TAG = 'tag',
   RELEASE = 'release',

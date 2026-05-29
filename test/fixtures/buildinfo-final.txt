@@ -1,5 +1,0 @@
-// clang-format off
-// NOLINTNEXTLINE(readability-identifier-naming)
-char const* const versionString = "3.1.0"
-    // clang-format on
-    ;
