@@ -56,7 +56,11 @@ async function start(): Promise<void> {
 
   app.post(
     '/webhook',
-    express.raw({ type: '*/*' }),
+    // Default raw-body limit is 100kb, which GitHub push payloads with
+    // large `commits[]` arrays routinely exceed (we've seen 900kb+ → 413
+    // in prod). GitHub caps webhook payloads at 25mb; 5mb gives headroom
+    // for normal traffic without opening us up to absurd bodies.
+    express.raw({ type: '*/*', limit: '5mb' }),
     asyncHandler((req, res) => handleWebhook(req, res, config, storage))
   )
 
