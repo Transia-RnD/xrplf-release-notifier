@@ -6,16 +6,22 @@
  *   npx ts-node scripts/dry-run.ts                  # latest beta tag from XRPLF/rippled
  *   npx ts-node scripts/dry-run.ts 3.2.0-b6         # specific tag
  *   npx ts-node scripts/dry-run.ts 3.1.3 --json     # JSON output (machine-readable)
+ *   npx ts-node scripts/dry-run.ts 3.2.0 --final    # full FINAL flow: tag → release → binary,
+ *                                                   # renders the release-card PNG to /tmp
  *
  * Comms iteration loop: edit prompts in `src/ai/summarizer.ts` (constants
  * at the top), rebuild (`npm run build`), rerun this script, compare output.
  */
 import 'dotenv/config'
+import { writeFileSync } from 'fs'
 import axios from 'axios'
 import winston from 'winston'
 import type { Summaries } from '../src/ai/summarizer'
 import { summarizeReleaseByTag } from '../src/ai/summarizer'
 import { formatMattermost } from '../src/notifications/mattermost'
+import { renderReleaseCard } from '../src/notifications/release-card'
+import { fetchLatestBinaryVersions } from '../src/poller/binary-checker'
+import { PUBLIC_REPO, repoFullName } from '../src/github/repos'
 import type { VersionInfo } from '../src/version/types'
 import { NotificationSource, VersionType } from '../src/version/types'
 import { classifyVersion } from '../src/version/parser'
@@ -25,6 +31,7 @@ const REPO = 'rippled'
 
 const args = process.argv.slice(2)
 const jsonMode = args.includes('--json')
+const finalMode = args.includes('--final')
 const tagArg = args.find((a) => !a.startsWith('--'))
 
 async function pickTag(): Promise<string> {
@@ -199,12 +206,88 @@ async function main() {
   const scenarios = buildScenarios(version)
   const rendered = scenarios.map((s) => renderScenario(s, summaries))
 
+  // For --final, render the release card PNG to /tmp, scrape pool/stable
+  // to confirm the .deb/.rpm are actually live, and assemble the exact
+  // tweet text the binary-poll path would post.
+  let releaseCardPath: string | undefined
+  let finalTweetText: string | undefined
+  let binaryStatus:
+    | { deb: string | null; rpm: string | null; matchesTag: boolean }
+    | undefined
+  if (finalMode) {
+    if (version.type !== VersionType.FINAL) {
+      console.error(
+        `--final requires a FINAL tag (X.Y.Z without -bN/-rcN); got: ${tag}`
+      )
+      process.exit(1)
+    }
+    const png = await renderReleaseCard(tag)
+    releaseCardPath = `/tmp/release-card-${tag}.png`
+    writeFileSync(releaseCardPath, png)
+    const releaseNotesUrl = `https://github.com/${repoFullName(PUBLIC_REPO)}/releases/tag/${tag}`
+    finalTweetText = `${summaries.twitter}\n\nRelease notes: ${releaseNotesUrl}`
+
+    // Actually hit repos.ripple.com to verify the binary is there — this
+    // is what /poll does in production before deciding to tweet.
+    const latest = await fetchLatestBinaryVersions()
+    binaryStatus = {
+      deb: latest.deb,
+      rpm: latest.rpm,
+      matchesTag: latest.deb === tag && latest.rpm === tag,
+    }
+  }
+
   if (jsonMode) {
     console.log(
-      JSON.stringify({ tag, summaries, scenarios: rendered }, null, 2)
+      JSON.stringify(
+        {
+          tag,
+          summaries,
+          scenarios: rendered,
+          ...(finalMode
+            ? { releaseCardPath, finalTweetText, binaryStatus }
+            : {}),
+        },
+        null,
+        2
+      )
     )
   } else {
     printHuman(rendered)
+    if (finalMode) {
+      console.log('\n' + '═'.repeat(80))
+      console.log('  BINARY POLL — repos.ripple.com/pool/stable/')
+      console.log('═'.repeat(80))
+      console.log()
+      console.log(`  Looking for tag:  ${tag}`)
+      console.log(`  Latest .deb:      ${binaryStatus?.deb ?? '(none)'}`)
+      console.log(`  Latest .rpm:      ${binaryStatus?.rpm ?? '(none)'}`)
+      console.log()
+      if (binaryStatus?.matchesTag) {
+        console.log(
+          `  ✓ Binary for ${tag} IS live on pool/stable — /poll would tweet now.`
+        )
+      } else {
+        console.log(
+          `  ✗ Binary for ${tag} is NOT yet on pool/stable — /poll would still be waiting.`
+        )
+        console.log(
+          `    (The tweet below is what would fire ONCE the binary lands.)`
+        )
+      }
+      console.log('\n' + '═'.repeat(80))
+      console.log('  TWITTER POST (binary-on-stable, what /poll would send)')
+      console.log('═'.repeat(80))
+      console.log()
+      console.log(`  Image:    ${releaseCardPath}`)
+      console.log(`  Open it:  open "${releaseCardPath}"`)
+      console.log()
+      console.log('  Text:')
+      finalTweetText?.split('\n').forEach((line) => console.log(`    ${line}`))
+      console.log(
+        `  (${finalTweetText?.length ?? 0}/280 chars, image attached)`
+      )
+    }
     console.log('\n' + '═'.repeat(80))
     console.log(
       '  Nothing was posted. To iterate, edit prompts in src/ai/summarizer.ts'

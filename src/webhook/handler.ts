@@ -10,7 +10,6 @@ import {
   formatMattermostPrivateReleaseHeadsUp,
   postToMattermost,
 } from '../notifications/mattermost'
-import { postToTwitter } from '../notifications/twitter'
 import {
   summarizeReleaseByTag,
   summarizeBody,
@@ -116,10 +115,7 @@ async function handleTagPush(
     // token and would expose commit messages we may not want to leak.
     // Just announce the bare fact that progress is happening.
     await sendNotifications(
-      {
-        mattermost: formatMattermostPrivateTagHeadsUp(versionInfo, repo),
-        twitter: '',
-      },
+      formatMattermostPrivateTagHeadsUp(versionInfo, repo),
       { scenario: 'tag-private', version: classified.raw, repo },
       deps
     )
@@ -142,20 +138,13 @@ async function handleTagPush(
   })
 
   await sendNotifications(
-    {
-      mattermost: formatMattermost(
-        versionInfo,
-        NotificationSource.TAG,
-        summary.mattermost,
-        repo
-      ),
-      twitter: summary.twitter,
-    },
-    {
-      scenario: 'tag',
-      version: classified.raw,
-      repo,
-    },
+    formatMattermost(
+      versionInfo,
+      NotificationSource.TAG,
+      summary.mattermost,
+      repo
+    ),
+    { scenario: 'tag', version: classified.raw, repo },
     deps
   )
 
@@ -237,14 +226,7 @@ export async function handleReleaseEvent(
     }
 
     await sendNotifications(
-      {
-        mattermost: formatMattermostPrivateReleaseHeadsUp(
-          versionInfo,
-          repo,
-          bodyMarkdown
-        ),
-        twitter: '',
-      },
+      formatMattermostPrivateReleaseHeadsUp(versionInfo, repo, bodyMarkdown),
       { scenario: 'release-private', version: classified.raw, repo },
       deps
     )
@@ -276,20 +258,13 @@ export async function handleReleaseEvent(
         })
 
   await sendNotifications(
-    {
-      mattermost: formatMattermost(
-        versionInfo,
-        NotificationSource.RELEASE,
-        summaries.mattermost,
-        repo
-      ),
-      twitter: summaries.twitter,
-    },
-    {
-      scenario: 'release',
-      version: classified.raw,
-      repo,
-    },
+    formatMattermost(
+      versionInfo,
+      NotificationSource.RELEASE,
+      summaries.mattermost,
+      repo
+    ),
+    { scenario: 'release', version: classified.raw, repo },
     deps
   )
 
@@ -318,20 +293,6 @@ function resolveRepo(
   return repo
 }
 
-/**
- * Twitter creds may legitimately be unset / placeholder while we wait for
- * a real account. Short-circuit instead of letting twitter-api-v2 spam the
- * logs with 401s on every notification.
- */
-function twitterConfigured(config: AppConfig): boolean {
-  return (
-    config.twitterApiKey.length > 0 &&
-    config.twitterApiKey !== 'placeholder' &&
-    config.twitterApiSecret.length > 0 &&
-    config.twitterApiSecret !== 'placeholder'
-  )
-}
-
 export interface NotificationContext {
   scenario: string
   version: string
@@ -339,66 +300,27 @@ export interface NotificationContext {
 }
 
 /**
- * Dispatch Mattermost and Twitter notifications. Both fire independently;
- * Twitter is skipped for private-repo events (embargoed) or when the
- * Twitter credentials are unset / placeholder.
+ * Post a webhook-driven Mattermost notification. Twitter is intentionally
+ * NOT fired from webhook paths — it's reserved for the binary-poll path
+ * in src/index.ts (the "install now" announcement, with image), since
+ * a tweet only matters once users can actually install.
  */
 export async function sendNotifications(
-  messages: { mattermost: MattermostPayload; twitter: string },
+  mattermostPayload: MattermostPayload,
   ctx: NotificationContext,
   deps: HandlerDeps
 ): Promise<void> {
   const { config, logger } = deps
-  const fullName = repoFullName(ctx.repo)
-
-  interface Target {
-    name: string
-    call: () => Promise<void>
-  }
-  const targets: Target[] = [
-    {
-      name: 'Mattermost',
-      call: () =>
-        postToMattermost(config.mattermostWebhookUrl, messages.mattermost),
-    },
-  ]
-
-  if (ctx.repo.visibility === 'private') {
-    logger.info('Skipping Twitter for private-repo heads-up', {
+  try {
+    await postToMattermost(config.mattermostWebhookUrl, mattermostPayload)
+    logger.info('Mattermost notification sent', {
       scenario: ctx.scenario,
       version: ctx.version,
-      repo: fullName,
+      repo: repoFullName(ctx.repo),
     })
-  } else if (!twitterConfigured(config)) {
-    logger.info('Twitter not configured — skipping post', {
-      tweet: messages.twitter,
-    })
-  } else {
-    targets.push({
-      name: 'Twitter',
-      call: () =>
-        postToTwitter(
-          {
-            appKey: config.twitterApiKey,
-            appSecret: config.twitterApiSecret,
-            accessToken: config.twitterAccessToken,
-            accessSecret: config.twitterAccessTokenSecret,
-          },
-          messages.twitter
-        ),
+  } catch (err: unknown) {
+    logger.error('Mattermost notification failed', {
+      error: err instanceof Error ? err.message : String(err),
     })
   }
-
-  const results = await Promise.allSettled(targets.map((t) => t.call()))
-  results.forEach((r, i) => {
-    const name = targets[i].name
-    if (r.status === 'rejected') {
-      const reason: unknown = r.reason
-      logger.error(`${name} notification failed`, {
-        error: reason instanceof Error ? reason.message : String(reason),
-      })
-    } else {
-      logger.info(`${name} notification sent`)
-    }
-  })
 }

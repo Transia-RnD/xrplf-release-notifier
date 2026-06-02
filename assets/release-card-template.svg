@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Mock release card. Replace this file with the real branded SVG.
+  Token {{VERSION}} is substituted at render time (e.g. 3.2.0).
+  Output dimensions are baked into width/height; renderer outputs PNG.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675">
+  <rect width="1200" height="675" fill="#000000"/>
+  <text x="100" y="320"
+        font-family="Helvetica, Arial, sans-serif"
+        font-size="56"
+        font-weight="300"
+        letter-spacing="6"
+        fill="#888888">XRP LEDGER · STABLE RELEASE</text>
+  <text x="100" y="500"
+        font-family="Helvetica, Arial, sans-serif"
+        font-size="200"
+        font-weight="800"
+        fill="#ffffff">XRPL {{VERSION}}</text>
+  <text x="1100" y="100"
+        font-family="Helvetica, Arial, sans-serif"
+        font-size="42"
+        font-weight="600"
+        fill="#ffffff"
+        text-anchor="end">XRP Ledger</text>
+</svg>

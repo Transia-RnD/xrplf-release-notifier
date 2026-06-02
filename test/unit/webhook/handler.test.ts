@@ -104,7 +104,8 @@ describe('handlePushEvent', () => {
     expect(result.source).toBe('tag')
     expect(result.repo).toBe(PUBLIC_REPO_FULL_NAME)
     expect(mattermost.postToMattermost).toHaveBeenCalled()
-    expect(twitter.postToTwitter).toHaveBeenCalled()
+    // Twitter is reserved for the binary-poll path — webhooks never tweet.
+    expect(twitter.postToTwitter).not.toHaveBeenCalled()
   })
 
   it('accepts BETA tag with v prefix', async () => {
@@ -199,7 +200,7 @@ describe('handleReleaseEvent', () => {
     expect(result.source).toBe('release')
     expect(result.repo).toBe(PUBLIC_REPO_FULL_NAME)
     expect(mattermost.postToMattermost).toHaveBeenCalled()
-    expect(twitter.postToTwitter).toHaveBeenCalled()
+    expect(twitter.postToTwitter).not.toHaveBeenCalled()
   })
 
   it('strips a v prefix on release tag_name', async () => {

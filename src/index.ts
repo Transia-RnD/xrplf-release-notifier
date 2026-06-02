@@ -24,6 +24,8 @@ import { summarizeReleaseByTag } from './ai/summarizer'
 import { fetchReleaseBody } from './github/client'
 import { PUBLIC_REPO, PRIVATE_REPO, repoFullName } from './github/repos'
 import type { RepoConfig } from './github/repos'
+import { renderReleaseCard } from './notifications/release-card'
+import { postToTwitter } from './notifications/twitter'
 
 const logger = winston.createLogger({
   level: 'info',
@@ -208,18 +210,45 @@ async function handlePoll(
   })
 
   await sendNotifications(
-    {
-      mattermost: formatMattermost(
-        versionInfo,
-        NotificationSource.BINARY_POLL,
-        summary.mattermost,
-        PUBLIC_REPO
-      ),
-      twitter: summary.twitter,
-    },
+    formatMattermost(
+      versionInfo,
+      NotificationSource.BINARY_POLL,
+      summary.mattermost,
+      PUBLIC_REPO
+    ),
     { scenario: 'binary', version: newVersion, repo: PUBLIC_REPO },
     { config, storage, logger }
   )
+
+  // Twitter announcement — the only place we post to Twitter. Includes the
+  // version-stamped release card image and a release-notes link appended
+  // to the AI-generated tweet body.
+  if (twitterConfigured(config)) {
+    try {
+      const cardPng = await renderReleaseCard(newVersion)
+      const releaseNotesUrl = `https://github.com/${repoFullName(PUBLIC_REPO)}/releases/tag/${newVersion}`
+      const tweetText = `${summary.twitter}\n\nRelease notes: ${releaseNotesUrl}`
+      await postToTwitter(
+        {
+          appKey: config.twitterApiKey,
+          appSecret: config.twitterApiSecret,
+          accessToken: config.twitterAccessToken,
+          accessSecret: config.twitterAccessTokenSecret,
+        },
+        tweetText,
+        { buffer: cardPng, mimeType: 'image/png' }
+      )
+      logger.info('Twitter notification sent', { version: newVersion })
+    } catch (err: unknown) {
+      logger.error('Twitter notification failed', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  } else {
+    logger.info('Twitter not configured — skipping post', {
+      tweet: summary.twitter,
+    })
+  }
 
   const now = new Date().toISOString()
   if (current.deb && current.deb !== state.deb?.version) {
@@ -245,6 +274,17 @@ async function handlePoll(
  * only ship on the public repos.ripple.com, so a private-only mirror is
  * unusual but possible during embargo windows.
  */
+/** Same short-circuit the webhook handler used to do — don't let Twitter
+ *  401-spam our logs while creds are placeholder. */
+function twitterConfigured(config: AppConfig): boolean {
+  return (
+    config.twitterApiKey.length > 0 &&
+    config.twitterApiKey !== 'placeholder' &&
+    config.twitterApiSecret.length > 0 &&
+    config.twitterApiSecret !== 'placeholder'
+  )
+}
+
 async function resolveBinaryReleaseRepo(
   tag: string,
   config: AppConfig

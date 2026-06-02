@@ -6,7 +6,12 @@ Automated release notifications for rippled version changes. Monitors both [XRPL
 
 A single rippled release fires through several upstream events (tag push, GitHub Release published, binary publish) and may fire **twice** — once from `XRPLF/rippled` (public) and once from `XRPLF/xrpld-private` (private).
 
-**Every supported event posts.** No dedup, no canonical-event-per-version-type heuristics — duplicate signals are preferable to silent misses when maintainer workflow varies (tag-only on private, release-publish on public, both, etc.). A single public FINAL release can therefore produce **three** Mattermost posts and **three** tweets: tag push → release published → binary on stable. See the [delivery matrix](#delivery-matrix) below for the full rules.
+Two channels, very different rules:
+
+- **Mattermost** posts on **every** supported event. Duplicate signals are preferable to silent misses when maintainer workflow varies. Internal channel, signal-rich.
+- **Twitter** posts **once per FINAL release**, only when the `.deb`/`.rpm` lands on `pool/stable/` (the "install now" moment). Tag pushes, RC release publishes, anything from xrpld-private — none of them tweet. The tweet includes the version-stamped release card PNG (`assets/release-card-template.svg` → 1200×675 PNG via `@resvg/resvg-js`) plus a `Release notes:` link.
+
+See the [delivery matrix](#delivery-matrix) for the full rules.
 
 The service fails hard if AI summarization breaks — no fallback copy ever reaches a public channel.
 
@@ -15,7 +20,7 @@ The service fails hard if AI summarization breaks — no fallback copy ever reac
 - `push` to any branch → ignored
 - `release` with `action: published`, not draft → release notification (uses the release body)
 
-**Polling path:** Cloud Scheduler triggers `/poll` every 15 minutes. The service scrapes `pool/stable/` on repos.ripple.com for new `.deb`/`.rpm` packages and notifies when a new FINAL binary appears. RC/beta builds live on `pool/unstable/` which is not polled.
+**Polling path:** Cloud Scheduler triggers `/poll` every 15 minutes. The service scrapes `pool/stable/` on repos.ripple.com for new `.deb`/`.rpm` packages, fires both Mattermost and Twitter when a new FINAL binary appears. RC/beta builds live on `pool/unstable/` which is not polled. **This is the only place Twitter is invoked** — the tweet waits for the install-ready signal.
 
 ## Setup
 
@@ -129,42 +134,54 @@ Tag refs may carry an optional `v` prefix (e.g. `v3.1.0`); we strip it before ma
 
 ## Delivery matrix
 
-The full set of rules: what fires Mattermost, what fires Twitter, per event × per repo. **`yes` = posts every time the event arrives** (no dedup), `—` = no post.
+What fires Mattermost vs Twitter, per event × per repo. **`yes` = posts every time the event arrives** (no dedup); `—` = no post.
 
 | Event | Repo | Mattermost | Twitter |
 |---|---|---|---|
 | Branch push (any ref under `refs/heads/*`) | any | — | — |
 | Tag deletion | any | — | — |
 | Tag not matching version regex (e.g. `smart-escrow-devnet4`) | any | — | — |
-| Tag push `X.Y.Z-bN` (BETA) | public | yes — blue `formatMattermost(TAG)` + AI commit-compare summary | yes |
+| Tag push `X.Y.Z-bN` (BETA) | public | yes — blue `formatMattermost(TAG)` + AI commit-compare summary | — |
 | Tag push `X.Y.Z-bN` (BETA) | private | yes — grey `formatMattermostPrivateTagHeadsUp`, no body, no link | — |
-| Tag push `X.Y.Z-rcN` (RC) | public | yes — blue `formatMattermost(TAG)` + AI commit-compare summary | yes |
+| Tag push `X.Y.Z-rcN` (RC) | public | yes — blue `formatMattermost(TAG)` + AI commit-compare summary | — |
 | Tag push `X.Y.Z-rcN` (RC) | private | yes — grey `formatMattermostPrivateTagHeadsUp` | — |
-| Tag push `X.Y.Z` (FINAL) | public | yes — blue `formatMattermost(TAG)` + AI commit-compare summary | yes |
+| Tag push `X.Y.Z` (FINAL) | public | yes — blue `formatMattermost(TAG)` + AI commit-compare summary | — |
 | Tag push `X.Y.Z` (FINAL) | private | yes — grey `formatMattermostPrivateTagHeadsUp` | — |
 | `release.published` (draft) | any | — | — |
-| `release.published` RC | public | yes — orange `formatMattermost(RELEASE)` + AI body summary | yes |
+| `release.published` RC | public | yes — orange `formatMattermost(RELEASE)` + AI body summary | — |
 | `release.published` RC | private | yes — grey `formatMattermostPrivateReleaseHeadsUp` + AI summary of payload body | — |
-| `release.published` FINAL | public | yes — green `formatMattermost(RELEASE)` + AI body summary | yes |
+| `release.published` FINAL | public | yes — green `formatMattermost(RELEASE)` + AI body summary | — |
 | `release.published` FINAL | private | yes — grey `formatMattermostPrivateReleaseHeadsUp` + AI summary of payload body | — |
-| Binary `.deb`/`.rpm` on `pool/stable/` for a FINAL | (always posted as public) | yes — green `formatMattermost(BINARY_POLL)` + install commands | yes |
+| Binary `.deb`/`.rpm` on `pool/stable/` for a FINAL | (treated as public) | yes — green `formatMattermost(BINARY_POLL)` + install commands | **yes** — release-card PNG + `Release notes: …` link |
 | Binary on `pool/stable/` for non-FINAL | — | — | — |
 
 ### Lifecycle of one FINAL release
 
-For a final like `3.2.0`, expect over hours-to-days (with current "fire on every event" rules):
+For a final like `3.2.0`, expect over hours-to-days:
 
 ```
-git tag 3.2.0 pushed              → 1 Mattermost post + 1 tweet  (blue tag, commit-compare summary)
-GitHub Release 3.2.0 published    → 1 Mattermost post + 1 tweet  (green release, body summary)
-.deb/.rpm on pool/stable/         → 1 Mattermost post + 1 tweet  (green binary, install commands)
+git tag 3.2.0 pushed              → 1 Mattermost post  (blue tag, commit-compare summary)
+GitHub Release 3.2.0 published    → 1 Mattermost post  (green release, body summary)
+.deb/.rpm on pool/stable/         → 1 Mattermost post  (green binary, install commands)
+                                  + 1 tweet            (image + release-notes link, "install now")
                                    ─────────────────────────────
-                          Total:    3 Mattermost posts + 3 tweets
+                          Total:    3 Mattermost posts + 1 tweet
 ```
 
 If the same release also hits xrpld-private with a tag push and release publish, add **2 more** grey Mattermost heads-ups (no tweets).
 
-An RC ships up to 2 Mattermost + 2 tweets (tag + release-published). A BETA ships 1 Mattermost + 1 tweet (tag push; betas rarely get a GitHub Release object).
+An RC ships up to 2 Mattermost posts (tag + release-published) + **0 tweets**. A BETA ships 1 Mattermost post + 0 tweets. Twitter only ever fires for the FINAL binary-on-stable event.
+
+### Twitter image (release card)
+
+`assets/release-card-template.svg` is the template. `{{VERSION}}` is substituted at render time and the file is rendered to a 1200×675 PNG via `@resvg/resvg-js` (in-process, no headless browser). The PNG is uploaded via Twitter's v1.1 `media/upload`, then attached to the v2 tweet via `media_ids`. To iterate on the card, edit the SVG and run:
+
+```bash
+npx ts-node scripts/dry-run.ts 3.2.0 --final
+open /tmp/release-card-3.2.0.png
+```
+
+Dry-run prints the exact tweet text (AI summary + release-notes URL) and saves the PNG locally; **no upload happens**.
 
 ### Dual-repo policy
 
