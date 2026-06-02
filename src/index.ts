@@ -207,6 +207,8 @@ async function handlePoll(
     apiKey: config.anthropicApiKey,
     githubToken: config.githubToken,
     logger,
+    // The binary-poll path is the ONLY place we tweet — finals on stable.
+    includeTwitter: true,
   })
 
   await sendNotifications(

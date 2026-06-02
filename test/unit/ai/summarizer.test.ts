@@ -53,6 +53,7 @@ describe('summarizeReleaseByTag', () => {
       repo: 'rippled',
       tag: '3.1.3',
       apiKey: 'test-key',
+      includeTwitter: true,
     })
 
     expect(result.mattermost).toContain("**What's in this release:**")
@@ -62,6 +63,25 @@ describe('summarizeReleaseByTag', () => {
     )
     expect(mockCreate).toHaveBeenCalledTimes(2)
     expect(mockedClient.listVersionTags).not.toHaveBeenCalled()
+  })
+
+  it('skips the tweet by default — Mattermost only, one AI call', async () => {
+    mockedClient.fetchReleaseBody.mockResolvedValue(
+      'Long enough release body content here.'
+    )
+    mockCreate.mockReturnValueOnce(aiResponse('• Security fix\n• Bug fix'))
+
+    const result = await summarizeReleaseByTag({
+      owner: 'XRPLF',
+      repo: 'rippled',
+      tag: '3.1.3',
+      apiKey: 'test-key',
+    })
+
+    expect(result.mattermost).toContain('• Security fix')
+    expect(result.twitter).toBe('')
+    // Only the Mattermost call fires — the Twitter prompt is never sent.
+    expect(mockCreate).toHaveBeenCalledTimes(1)
   })
 
   it('falls back to commit-compare when no Release body exists', async () => {
@@ -87,6 +107,7 @@ describe('summarizeReleaseByTag', () => {
       repo: 'rippled',
       tag: '3.2.0-b6',
       apiKey: 'test-key',
+      includeTwitter: true,
     })
 
     expect(result.mattermost).toContain('Preliminary changes since')
@@ -207,8 +228,30 @@ describe('summarizeReleaseByTag', () => {
         repo: 'rippled',
         tag: '3.1.3',
         apiKey: 'test-key',
+        includeTwitter: true,
       })
     ).rejects.toThrow('AI tweet exceeded')
+  })
+
+  it('does not throw on a long tweet when Twitter is not requested', async () => {
+    mockedClient.fetchReleaseBody.mockResolvedValue(
+      'Long enough release body content here.'
+    )
+    mockCreate.mockReturnValueOnce(aiResponse('• Good bullets'))
+    // Even if a tweet WOULD be over-length, the default path never asks for
+    // one, so the over-length guard can't kill the Mattermost post.
+    mockCreate.mockReturnValueOnce(aiResponse('x'.repeat(300)))
+
+    const result = await summarizeReleaseByTag({
+      owner: 'XRPLF',
+      repo: 'rippled',
+      tag: '3.1.3',
+      apiKey: 'test-key',
+    })
+
+    expect(result.mattermost).toContain('• Good bullets')
+    expect(result.twitter).toBe('')
+    expect(mockCreate).toHaveBeenCalledTimes(1)
   })
 
   it('treats blank/short release body as "no body" and falls back to commits', async () => {
