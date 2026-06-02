@@ -4,21 +4,16 @@ Automated release notifications for rippled version changes. Monitors both [XRPL
 
 ## How It Works
 
-A single rippled release fires through several upstream events (source bump, tag, GitHub Release, binary publish) — and now those events fire **twice**, once from `XRPLF/rippled` (public) and once from `XRPLF/xrpld-private` (private). To avoid spamming the same announcement multiple times, the service picks **one canonical event per version type** and additionally deduplicates across repos:
+A single rippled release fires through several upstream events (tag push, GitHub Release published, binary publish) and may fire **twice** — once from `XRPLF/rippled` (public) and once from `XRPLF/xrpld-private` (private).
 
-| Version type | Canonical event | Notifications per release |
-|---|---|---|
-| **BETA** (`X.Y.Z-bN`) | Tag push | 1 |
-| **RC** (`X.Y.Z-rcN`) | GitHub Release published | 1 |
-| **FINAL** (`X.Y.Z`) | GitHub Release published, then binary on `pool/stable/` | 2 (release notes, then install-now) |
+**Every supported event posts.** No dedup, no canonical-event-per-version-type heuristics — duplicate signals are preferable to silent misses when maintainer workflow varies (tag-only on private, release-publish on public, both, etc.). A single public FINAL release can therefore produce **three** Mattermost posts and **three** tweets: tag push → release published → binary on stable. See the [delivery matrix](#delivery-matrix) below for the full rules.
 
-Every other event (branch pushes / source bumps, tag pushes for RC and FINAL) is acknowledged with a `200 ignored` and posts nothing. The service fails hard if AI summarization breaks — no fallback copy ever reaches a public channel.
+The service fails hard if AI summarization breaks — no fallback copy ever reaches a public channel.
 
-**Webhook path:** A GitHub App delivers push and release events. `/webhook` dispatches by `X-GitHub-Event`:
-- `push` to `refs/tags/X.Y.Z-bN` (or `vX.Y.Z-bN`) → BETA tag notification
+**Webhook path:** GitHub webhooks installed on both repos deliver `push` and `release` events to `/webhook`:
+- `push` to `refs/tags/X.Y.Z[-bN|-rcN]` → tag notification (BETA / RC / FINAL all post)
 - `push` to any branch → ignored
-- `push` to non-beta tag (`X.Y.Z`, `X.Y.Z-rcN`) → ignored (GitHub Release event handles those)
-- `release` with `action: published`, not draft → RC or FINAL notification (uses the release body)
+- `release` with `action: published`, not draft → release notification (uses the release body)
 
 **Polling path:** Cloud Scheduler triggers `/poll` every 15 minutes. The service scrapes `pool/stable/` on repos.ripple.com for new `.deb`/`.rpm` packages and notifies when a new FINAL binary appears. RC/beta builds live on `pool/unstable/` which is not polled.
 
@@ -132,84 +127,63 @@ any repo not in that list return `200 ignored`.
 
 Tag refs may carry an optional `v` prefix (e.g. `v3.1.0`); we strip it before matching.
 
-## Notification Scenarios
+## Delivery matrix
 
-Each rippled release fires through many upstream events but the service only posts on the **one** canonical event per version type. Here's what posts, when, and what it looks like:
+The full set of rules: what fires Mattermost, what fires Twitter, per event × per repo. **`yes` = posts every time the event arrives** (no dedup), `—` = no post.
 
-| Scenario | Trigger | Version types | Color | Summary source |
-|----------|---------|---------------|-------|----------------|
-| **BETA tag pushed** | `push` event with `ref: refs/tags/X.Y.Z-bN` | BETA | light blue (`#2196F3`) | Commit-compare since previous beta (no GitHub Release exists) |
-| **RC published** | `release` event, `action: published`, prerelease | RC | orange (`#FF9800`) | Curated Release body from payload |
-| **FINAL published** | `release` event, `action: published`, not prerelease | FINAL | green (`#4CAF50`) | Curated Release body from payload |
-| **FINAL binary on stable** | `/poll` detects new `.deb`/`.rpm` on `pool/stable/` | FINAL | green (`#4CAF50`) | Curated Release body fetched from GitHub |
+| Event | Repo | Mattermost | Twitter |
+|---|---|---|---|
+| Branch push (any ref under `refs/heads/*`) | any | — | — |
+| Tag deletion | any | — | — |
+| Tag not matching version regex (e.g. `smart-escrow-devnet4`) | any | — | — |
+| Tag push `X.Y.Z-bN` (BETA) | public | yes — blue `formatMattermost(TAG)` + AI commit-compare summary | yes |
+| Tag push `X.Y.Z-bN` (BETA) | private | yes — grey `formatMattermostPrivateTagHeadsUp`, no body, no link | — |
+| Tag push `X.Y.Z-rcN` (RC) | public | yes — blue `formatMattermost(TAG)` + AI commit-compare summary | yes |
+| Tag push `X.Y.Z-rcN` (RC) | private | yes — grey `formatMattermostPrivateTagHeadsUp` | — |
+| Tag push `X.Y.Z` (FINAL) | public | yes — blue `formatMattermost(TAG)` + AI commit-compare summary | yes |
+| Tag push `X.Y.Z` (FINAL) | private | yes — grey `formatMattermostPrivateTagHeadsUp` | — |
+| `release.published` (draft) | any | — | — |
+| `release.published` RC | public | yes — orange `formatMattermost(RELEASE)` + AI body summary | yes |
+| `release.published` RC | private | yes — grey `formatMattermostPrivateReleaseHeadsUp` + AI summary of payload body | — |
+| `release.published` FINAL | public | yes — green `formatMattermost(RELEASE)` + AI body summary | yes |
+| `release.published` FINAL | private | yes — grey `formatMattermostPrivateReleaseHeadsUp` + AI summary of payload body | — |
+| Binary `.deb`/`.rpm` on `pool/stable/` for a FINAL | (always posted as public) | yes — green `formatMattermost(BINARY_POLL)` + install commands | yes |
+| Binary on `pool/stable/` for non-FINAL | — | — | — |
 
-### Lifecycle of one release
+### Lifecycle of one FINAL release
 
-For a typical final release like `3.2.0`, expect this sequence over hours-to-days:
+For a final like `3.2.0`, expect over hours-to-days (with current "fire on every event" rules):
 
 ```
-BuildInfo.cpp bump (release-3.2)   → ignored (no notification)
-git tag 3.2.0 pushed               → ignored (release event will notify)
-GitHub Release 3.2.0 published     → FINAL published  (1 notification)
-.deb/.rpm appear on pool/stable/   → FINAL binary on stable  (1 notification on next /poll tick)
+git tag 3.2.0 pushed              → 1 Mattermost post + 1 tweet  (blue tag, commit-compare summary)
+GitHub Release 3.2.0 published    → 1 Mattermost post + 1 tweet  (green release, body summary)
+.deb/.rpm on pool/stable/         → 1 Mattermost post + 1 tweet  (green binary, install commands)
+                                   ─────────────────────────────
+                          Total:    3 Mattermost posts + 3 tweets
 ```
 
-So a final ships **2 notifications**, an RC ships **1** (release-published), a beta ships **1** (tag push).
+If the same release also hits xrpld-private with a tag push and release publish, add **2 more** grey Mattermost heads-ups (no tweets).
 
-### Filtering rules
-
-- **Branch pushes**: all ignored. Source bumps no longer notify — the tag/release event is the canonical announcement.
-- **Tag pushes**: only BETA tags notify (`X.Y.Z-bN`). RC and FINAL tag pushes are ignored because the GitHub Release event covers them with better content (release notes).
-- **Tag deletions**: ignored. Tags not matching the version regex (e.g. `smart-escrow-devnet4`): ignored.
-- **Release events**: only `action: "published"`, not draft. RC publishes are kept (they have `prerelease: true`).
-- **Binary poll**: only FINAL versions on `pool/stable/`. RC/beta binaries live on `pool/unstable/` which is not polled. If a non-final ever shows up on stable, the poll is logged and skipped.
+An RC ships up to 2 Mattermost + 2 tweets (tag + release-published). A BETA ships 1 Mattermost + 1 tweet (tag push; betas rarely get a GitHub Release object).
 
 ### Dual-repo policy
 
-Both `XRPLF/rippled` (public) and `XRPLF/xrpld-private` are registered as
-webhook sources (see [src/github/repos.ts](src/github/repos.ts)) but they
-follow different code paths:
+Both repos are registered as webhook sources (see [src/github/repos.ts](src/github/repos.ts)) but they post different content:
 
-| Source repo | Mattermost | Twitter | Content source |
+| Source repo | Mattermost copy | Twitter | Content source |
 |---|---|---|---|
-| `XRPLF/rippled` (public) | canonical full post | yes | release body in payload, falls back to GitHub API (release notes / commit-compare) |
-| `XRPLF/xrpld-private` | **heads-up only** | **never** | webhook payload only — no GitHub API call |
+| `XRPLF/rippled` (public) | canonical (blue / orange / green) with full AI summary | yes | release body in payload, falls back to GitHub API (release notes / commit-compare) |
+| `XRPLF/xrpld-private` | grey "heads-up" with minimal content (bare tag) or payload-body-summary (release publish) | **never** | webhook payload only — no GitHub API call |
 
-The motivation for the private heads-up: maintainers may cut several RCs
-on the private mirror before any public push lands, so without a signal
-the community gets the final public release with no prior warning. The
-heads-up gives the "something is happening" signal without dragging in
-broken links or embargoed content we'd have to fetch separately.
+The motivation for the private heads-up: maintainers may cut several RCs on the private mirror before any public push lands, so without a signal the community gets the final public release with no prior warning.
 
-Private heads-up shape:
-- **Tag push (BETA only)** → grey-bordered Mattermost post: `:lock: rippled \`3.2.0-b7\` tagged on \`XRPLF/xrpld-private\` (abc1234) — public mirror expected to follow.` No body, no link.
-- **Release published (RC/FINAL)** → grey-bordered Mattermost post with the AI-summarized release body **from the webhook payload** (no `fetchReleaseBody` call). If the payload body is empty, the post still goes out with `_No release notes in webhook payload._` placeholder.
+Private heads-up shapes:
+- **Tag push (any type)** → grey post: `:lock: rippled \`3.2.0-rc4\` tagged on \`XRPLF/xrpld-private\` (abc1234) — public mirror expected to follow.` No body, no link.
+- **Release published (RC/FINAL)** → grey post with the AI-summarized release body **from the webhook payload** (no `fetchReleaseBody` call). If the payload body is empty, the post still goes out with `_No release notes in webhook payload._` placeholder.
 
-Anything that would require a GitHub API call on the private repo is
-skipped — that means the commit-compare path is unreachable on private.
-This keeps the GitHub App permissions story simple and means our
-notifier never has to read embargoed code or commit messages it doesn't
-already have.
+Anything that would require a GitHub API call on the private repo is skipped — that means the commit-compare path is unreachable on private. This keeps permissions simple and means our notifier never has to read embargoed code or commit messages it doesn't already have in the webhook payload.
 
-Twitter is never invoked for private events, regardless of channel
-configuration.
-
-### Cross-event dedup
-
-A small per-key claim ledger lives in the GCS bucket under
-`dedup/{channel}-{scenario}-{version}.json`, using GCS's
-`ifGenerationMatch: 0` precondition for atomic claim. This handles GitHub
-redelivering the same webhook (network blip, manual replay) and the
-`release`-event-vs-binary-poll overlap for finals. Dedup is **per
-channel** — `mattermost:release:3.2.0` and `twitter:release:3.2.0` are
-separate keys.
-
-Critically, private heads-ups use **distinct scenarios**
-(`tag-private`, `release-private`) so they never collide with the public
-canonical posts (`tag`, `release`, `binary`). For a release that hits
-both repos, expect two Mattermost posts: a grey heads-up when it lands on
-private, and the canonical green/orange/blue post when public catches
-up.
+**Twitter is never invoked for private events**, regardless of channel configuration.
 
 ### Binary poll repo fallback
 

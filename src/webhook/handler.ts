@@ -2,7 +2,7 @@ import type { Logger } from 'winston'
 import type { Storage } from '@google-cloud/storage'
 import { classifyVersion } from '../version/parser'
 import type { VersionInfo } from '../version/types'
-import { NotificationSource, VersionType } from '../version/types'
+import { NotificationSource } from '../version/types'
 import type { MattermostPayload } from '../notifications/mattermost'
 import {
   formatMattermost,
@@ -19,7 +19,6 @@ import {
 import type { AppConfig } from '../config'
 import type { RepoConfig } from '../github/repos'
 import { findRepoByFullName, repoFullName } from '../github/repos'
-import { tryClaim, type DedupScenario } from '../dedup/store'
 import {
   PushEventSchema,
   ReleaseEventSchema,
@@ -92,14 +91,11 @@ async function handleTagPush(
     return { action: 'ignored', reason: 'tag does not match version pattern' }
   }
 
-  // Tag push only notifies for betas — RCs and finals are announced via the
-  // GitHub Release event instead, which has actual release notes.
-  if (classified.type !== VersionType.BETA) {
-    return {
-      action: 'ignored',
-      reason: `tag push for ${classified.type} — release event will notify instead`,
-    }
-  }
+  // Every version type fires on tag push — BETA, RC, and FINAL all post.
+  // Release-event posts (for RC/FINAL) are intentionally allowed to fire
+  // alongside; duplicate signals are preferable to silent misses when the
+  // maintainer workflow varies (tag-only on private, release-publish on
+  // public, both, etc.). Dedup is intentionally not done here.
 
   const headCommit = payload.head_commit
   const sha = headCommit?.id ?? payload.after ?? ''
@@ -337,55 +333,37 @@ function twitterConfigured(config: AppConfig): boolean {
 }
 
 export interface NotificationContext {
-  scenario: DedupScenario
+  scenario: string
   version: string
   repo: RepoConfig
 }
 
 /**
- * Dispatch Mattermost and Twitter notifications independently, each gated by
- * a per-channel dedup claim. The first webhook (public or private repo) to
- * land for a given (channel, scenario, version) wins. Twitter is skipped
- * entirely for private-repo events so embargoed releases don't leak.
+ * Dispatch Mattermost and Twitter notifications. Both fire independently;
+ * Twitter is skipped for private-repo events (embargoed) or when the
+ * Twitter credentials are unset / placeholder.
  */
 export async function sendNotifications(
   messages: { mattermost: MattermostPayload; twitter: string },
   ctx: NotificationContext,
   deps: HandlerDeps
 ): Promise<void> {
-  const { config, storage, logger } = deps
+  const { config, logger } = deps
   const fullName = repoFullName(ctx.repo)
 
   interface Target {
     name: string
     call: () => Promise<void>
   }
-  const targets: Target[] = []
-
-  const mattermostClaimed = await tryClaim(
-    storage,
-    'mattermost',
-    ctx.scenario,
-    ctx.version,
-    fullName
-  )
-  if (mattermostClaimed) {
-    targets.push({
+  const targets: Target[] = [
+    {
       name: 'Mattermost',
       call: () =>
         postToMattermost(config.mattermostWebhookUrl, messages.mattermost),
-    })
-  } else {
-    logger.info('Mattermost notification deduped', {
-      scenario: ctx.scenario,
-      version: ctx.version,
-      repo: fullName,
-    })
-  }
+    },
+  ]
 
   if (ctx.repo.visibility === 'private') {
-    // Heads-ups for the private mirror never tweet, even if the channel is
-    // configured — public Twitter is for the canonical public-mirror post.
     logger.info('Skipping Twitter for private-repo heads-up', {
       scenario: ctx.scenario,
       version: ctx.version,
@@ -396,37 +374,20 @@ export async function sendNotifications(
       tweet: messages.twitter,
     })
   } else {
-    const twitterClaimed = await tryClaim(
-      storage,
-      'twitter',
-      ctx.scenario,
-      ctx.version,
-      fullName
-    )
-    if (twitterClaimed) {
-      targets.push({
-        name: 'Twitter',
-        call: () =>
-          postToTwitter(
-            {
-              appKey: config.twitterApiKey,
-              appSecret: config.twitterApiSecret,
-              accessToken: config.twitterAccessToken,
-              accessSecret: config.twitterAccessTokenSecret,
-            },
-            messages.twitter
-          ),
-      })
-    } else {
-      logger.info('Twitter notification deduped', {
-        scenario: ctx.scenario,
-        version: ctx.version,
-        repo: fullName,
-      })
-    }
+    targets.push({
+      name: 'Twitter',
+      call: () =>
+        postToTwitter(
+          {
+            appKey: config.twitterApiKey,
+            appSecret: config.twitterApiSecret,
+            accessToken: config.twitterAccessToken,
+            accessSecret: config.twitterAccessTokenSecret,
+          },
+          messages.twitter
+        ),
+    })
   }
-
-  if (targets.length === 0) return
 
   const results = await Promise.allSettled(targets.map((t) => t.call()))
   results.forEach((r, i) => {

@@ -8,7 +8,6 @@ import type { AppConfig } from '../../../src/config'
 import * as mattermost from '../../../src/notifications/mattermost'
 import * as twitter from '../../../src/notifications/twitter'
 import * as summarizer from '../../../src/ai/summarizer'
-import * as dedup from '../../../src/dedup/store'
 
 jest.mock('../../../src/github/client')
 jest.mock('../../../src/notifications/mattermost', () => ({
@@ -18,9 +17,6 @@ jest.mock('../../../src/notifications/mattermost', () => ({
   postToMattermost: jest.fn(),
 }))
 jest.mock('../../../src/notifications/twitter')
-jest.mock('../../../src/dedup/store', () => ({
-  tryClaim: jest.fn(),
-}))
 jest.mock('../../../src/ai/summarizer', () => ({
   MIN_RELEASE_BODY_CHARS: 20,
   summarizeReleaseByTag: jest.fn(),
@@ -72,7 +68,6 @@ describe('handlePushEvent', () => {
   beforeEach(() => {
     ;(mattermost.postToMattermost as jest.Mock).mockResolvedValue(undefined)
     ;(twitter.postToTwitter as jest.Mock).mockResolvedValue(undefined)
-    ;(dedup.tryClaim as jest.Mock).mockResolvedValue(true)
     primeSummarizerMocks()
   })
 
@@ -125,24 +120,26 @@ describe('handlePushEvent', () => {
     expect(result.version).toBe('3.2.0-b7')
   })
 
-  it('ignores RC tag pushes — release event will notify instead', async () => {
+  it('notifies on RC tag push (no longer ignored)', async () => {
     const payload = withRepo({
       ref: 'refs/tags/3.1.0-rc1',
       head_commit: { id: 'abc123' },
     })
     const result = await handlePushEvent(payload, deps)
-    expect(result.action).toBe('ignored')
-    expect(mattermost.postToMattermost).not.toHaveBeenCalled()
+    expect(result.action).toBe('notified')
+    expect(result.type).toBe('rc')
+    expect(mattermost.postToMattermost).toHaveBeenCalled()
   })
 
-  it('ignores FINAL tag pushes — release event will notify instead', async () => {
+  it('notifies on FINAL tag push (no longer ignored)', async () => {
     const payload = withRepo({
       ref: 'refs/tags/3.1.0',
       head_commit: { id: 'abc123' },
     })
     const result = await handlePushEvent(payload, deps)
-    expect(result.action).toBe('ignored')
-    expect(mattermost.postToMattermost).not.toHaveBeenCalled()
+    expect(result.action).toBe('notified')
+    expect(result.type).toBe('final')
+    expect(mattermost.postToMattermost).toHaveBeenCalled()
   })
 
   it('ignores tag deletion events', async () => {
@@ -181,7 +178,6 @@ describe('handleReleaseEvent', () => {
   beforeEach(() => {
     ;(mattermost.postToMattermost as jest.Mock).mockResolvedValue(undefined)
     ;(twitter.postToTwitter as jest.Mock).mockResolvedValue(undefined)
-    ;(dedup.tryClaim as jest.Mock).mockResolvedValue(true)
     primeSummarizerMocks()
   })
 
@@ -261,31 +257,7 @@ describe('dual-repo behavior', () => {
 
   afterEach(() => jest.resetAllMocks())
 
-  it('public-then-public: dedup blocks the second post on both channels', async () => {
-    ;(dedup.tryClaim as jest.Mock).mockResolvedValueOnce(true) // mm 1st
-    ;(dedup.tryClaim as jest.Mock).mockResolvedValueOnce(true) // tw 1st
-    ;(dedup.tryClaim as jest.Mock).mockResolvedValue(false) // 2nd call both fail
-
-    const payload = withRepo({
-      action: 'published',
-      release: {
-        tag_name: '3.1.0',
-        html_url: 'https://github.com/XRPLF/rippled/releases/tag/3.1.0',
-        draft: false,
-        prerelease: false,
-      },
-    })
-
-    await handleReleaseEvent(payload, deps)
-    await handleReleaseEvent(payload, deps)
-
-    expect(mattermost.postToMattermost).toHaveBeenCalledTimes(1)
-    expect(twitter.postToTwitter).toHaveBeenCalledTimes(1)
-  })
-
-  it('private release with body: posts heads-up to Mattermost via summarizeBody, skips Twitter', async () => {
-    ;(dedup.tryClaim as jest.Mock).mockResolvedValue(true)
-
+  it('private release with body: posts heads-up via summarizeBody, no Twitter', async () => {
     const payload = withRepo(
       {
         action: 'published',
@@ -311,20 +283,9 @@ describe('dual-repo behavior', () => {
     expect(mattermost.formatMattermostPrivateReleaseHeadsUp).toHaveBeenCalled()
     expect(mattermost.postToMattermost).toHaveBeenCalledTimes(1)
     expect(twitter.postToTwitter).not.toHaveBeenCalled()
-    // Only Mattermost claims a dedup slot; Twitter is short-circuited.
-    expect(dedup.tryClaim).toHaveBeenCalledTimes(1)
-    expect(dedup.tryClaim).toHaveBeenCalledWith(
-      expect.anything(),
-      'mattermost',
-      'release-private',
-      '3.2.0-rc2',
-      PRIVATE_REPO_FULL_NAME
-    )
   })
 
   it('private release with empty body: still posts heads-up (no API fallback)', async () => {
-    ;(dedup.tryClaim as jest.Mock).mockResolvedValue(true)
-
     const payload = withRepo(
       {
         action: 'published',
@@ -352,8 +313,6 @@ describe('dual-repo behavior', () => {
   })
 
   it('private BETA tag push: bare heads-up, no API calls, no Twitter', async () => {
-    ;(dedup.tryClaim as jest.Mock).mockResolvedValue(true)
-
     const payload = withRepo(
       {
         ref: 'refs/tags/3.2.0-b7',
@@ -370,38 +329,24 @@ describe('dual-repo behavior', () => {
     expect(mattermost.formatMattermostPrivateTagHeadsUp).toHaveBeenCalled()
     expect(mattermost.postToMattermost).toHaveBeenCalledTimes(1)
     expect(twitter.postToTwitter).not.toHaveBeenCalled()
-    expect(dedup.tryClaim).toHaveBeenCalledWith(
-      expect.anything(),
-      'mattermost',
-      'tag-private',
-      '3.2.0-b7',
-      PRIVATE_REPO_FULL_NAME
-    )
   })
 
-  it('private-then-public for same tag: both fire (different scenario keys)', async () => {
-    // Distinct scenarios — `release-private` and `release` — so the heads-up
-    // and the canonical post never share a dedup slot.
-    ;(dedup.tryClaim as jest.Mock).mockResolvedValue(true)
-
-    const release = {
-      tag_name: '3.1.0',
-      html_url: 'https://github.com/XRPLF/rippled/releases/tag/3.1.0',
-      draft: false,
-      prerelease: false,
-      body: 'Final release notes that go above the minimum body length.',
-    }
-    await handleReleaseEvent(
-      withRepo({ action: 'published', release }, PRIVATE_REPO_FULL_NAME),
-      deps
-    )
-    await handleReleaseEvent(
-      withRepo({ action: 'published', release }, PUBLIC_REPO_FULL_NAME),
-      deps
+  it('private RC tag push: bare heads-up (no longer ignored)', async () => {
+    const payload = withRepo(
+      {
+        ref: 'refs/tags/3.2.0-rc4',
+        head_commit: { id: 'def4567890abcd' },
+      },
+      PRIVATE_REPO_FULL_NAME
     )
 
-    // Two Mattermost posts (heads-up + canonical), one tweet (canonical only).
-    expect(mattermost.postToMattermost).toHaveBeenCalledTimes(2)
-    expect(twitter.postToTwitter).toHaveBeenCalledTimes(1)
+    const result = await handlePushEvent(payload, deps)
+
+    expect(result.action).toBe('notified')
+    expect(result.type).toBe('rc')
+    expect(result.source).toBe('tag-private')
+    expect(mattermost.formatMattermostPrivateTagHeadsUp).toHaveBeenCalled()
+    expect(mattermost.postToMattermost).toHaveBeenCalledTimes(1)
+    expect(twitter.postToTwitter).not.toHaveBeenCalled()
   })
 })
