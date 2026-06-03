@@ -114,6 +114,10 @@ function renderScenario(s: ScenarioRender, summaries: Summaries) {
     summaries.mattermost
   )
   const att = mattermost.attachments?.[0]
+  // Production tweets ONLY from the final binary-poll path. Tag pushes and
+  // release-published events (any type, including final) post to Mattermost
+  // only — so the dry-run must not imply a tweet for them.
+  const tweets = s.source === NotificationSource.BINARY_POLL
   return {
     scenario: s.scenario,
     mattermost: {
@@ -126,8 +130,9 @@ function renderScenario(s: ScenarioRender, summaries: Summaries) {
       text: att?.text,
       footer: att?.footer,
     },
-    twitter: summaries.twitter,
-    twitter_chars: summaries.twitter.length,
+    tweets,
+    twitter: tweets ? summaries.twitter : '',
+    twitter_chars: tweets ? summaries.twitter.length : 0,
   }
 }
 
@@ -157,8 +162,14 @@ function printHuman(rendered: ReturnType<typeof renderScenario>[]) {
     console.log()
     console.log('  TWITTER / X')
     console.log('  ───────────')
-    console.log(`  (${r.twitter_chars}/280 chars)`)
-    console.log(`  ${r.twitter}`)
+    if (r.tweets) {
+      console.log(`  (${r.twitter_chars}/280 chars)`)
+      console.log(`  ${r.twitter}`)
+    } else {
+      console.log(
+        '  — no tweet (tweets only fire for FINAL binaries on stable)'
+      )
+    }
   }
 }
 
@@ -201,6 +212,8 @@ async function main() {
     apiKey,
     githubToken: process.env.GITHUB_TOKEN,
     logger,
+    // Only finals produce a tweet (binary-poll path); beta/RC are Mattermost-only.
+    includeTwitter: version.type === VersionType.FINAL,
   })
 
   const scenarios = buildScenarios(version)

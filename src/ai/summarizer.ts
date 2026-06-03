@@ -42,20 +42,31 @@ Output 5-10 short bullet points in markdown (using • not -). Rules:
 - Output ONLY the bullets — no preamble, no header, no "Preliminary changes since…" line, no closing remarks.
 - If nothing substantive is in the commits, output the single bullet: "• No notable changes since the previous version."`
 
-const TWITTER_PROMPT = `You write tweets (X posts) for rippled, the XRP Ledger reference server.
+const TWITTER_PROMPT = `You write tweets (X posts) announcing new releases of the XRP Ledger server software (known internally as "rippled", but NEVER write that word in the tweet).
 
 CRITICAL FRAMING — read this twice:
 This tweet ONLY fires AFTER the FINAL X.Y.Z binary packages have shipped on repos.ripple.com (the public stable channel). The reader CAN install RIGHT NOW. This is the "operators, update your nodes" announcement — like a routine deploy notice — not a stay-tuned teaser. Tag is always FINAL (X.Y.Z, no -bN/-rcN suffix).
 
 Your job: tell operators (a) the version is live, (b) why it matters in one tight phrase, (c) implicitly: act now.
 
+STRUCTURE (required) — write the tweet as TWO blocks with TWO BLANK LINES between them (i.e. three newline characters, "\\n\\n\\n"):
+- Block 1 (one line): the announcement + call to action, ending right after the action (e.g. "update your nodes.").
+- Block 2 (one line): the 1-2 concrete highlights, then the hashtag.
+
+The exact shape, both blank lines included:
+
+XRP Ledger version 3.1.3 is now available - update your nodes.
+
+
+fixCleanup3_1_3 amendment fixes NFTs, Vaults, and Lending Protocol. #XRPLedger
+
 Produce ONE tweet. Hard rules:
-- MAX 195 characters including hashtags and emojis. Count carefully — a "Release notes: https://github.com/XRPLF/rippled/releases/tag/X.Y.Z" line will be appended programmatically, so leave room.
-- End with: #XRPLedger #rippled
-- Mention the version explicitly (e.g. "rippled 3.1.3" or "XRPL 3.1.3").
+- MAX 195 characters including the hashtag. Count carefully — a "Release notes: https://github.com/XRPLF/rippled/releases/tag/X.Y.Z" line will be appended programmatically, so leave room.
+- End with: #XRPLedger
+- Refer to the release as "XRP Ledger version X.Y.Z" (e.g. "XRP Ledger version 3.1.3"). Never write the word "rippled" or "XRPL" in the tweet.
+- Use plain hyphens "-" only. Never use em dashes (—) or en dashes (–) anywhere in the tweet.
 - Use action language. Operators should know what to do.
-- Open with an emoji that fits: 📦 (default for binary release), 🛡️ (security release), 🔥 (major feature highlight), ⚠️ (urgent fix amendment / amendment activation).
-- Use 1-2 emojis total. Never put an emoji directly next to a hashtag.
+- NO emojis or other pictographs anywhere in the tweet — plain text only.
 - Highlight 1-2 concrete things from the changes (e.g. "fixCleanup3_1_3 amendment", "MPT cover checks"). If the release contains an AMENDMENT that's in an activation period, prioritise that — it's the strongest "act now" signal.
 - Short, energetic sentences. Active voice. No corporate filler.
 - Plain text only — no markdown, no bullet lists, no quotes around the tweet, no preamble.
@@ -70,16 +81,28 @@ BANNED phrasings (the old "stay tuned" framing is gone):
 - "coming next", "binaries coming", "stay tuned", "on the road to"
 - "tagged", "cut", "in flight", "what's brewing"
 - "release notes are live" — that's stale framing from the old release-publish-time tweet. Talk about the BINARIES being live.
-- Package-manager commands in the tweet (apt-get / yum) — they're in the Mattermost post; tweet is one line of "update now" energy.
+- Package-manager commands in the tweet (apt-get / yum) — they're in the Mattermost post; the tweet is just "update now" energy.
+- The words "rippled" and "XRPL" anywhere in the tweet — always say "XRP Ledger version X.Y.Z".
+- Em dashes (—) and en dashes (–) — use a plain hyphen "-" instead.
+- Emojis and pictographs of any kind — the tweet is plain text only.
 
-If no substantive content in the release notes, default to: "rippled X.Y.Z is now available — update your nodes. #XRPLedger #rippled"
+If no substantive content in the release notes, default to (both blank lines included):
+
+XRP Ledger version X.Y.Z is now available - update your nodes.
+
+
+#XRPLedger
 
 Output ONLY the tweet text. Nothing before, nothing after.`
 
 export interface Summaries {
   /** Markdown-shaped, multi-line, with leading header. Goes in Mattermost attachment body. */
   mattermost: string
-  /** Single line, ≤280 chars including hashtags. The tweet body. */
+  /**
+   * Single line, ≤280 chars including hashtags. The tweet body.
+   * Empty string when the caller did not request a tweet (includeTwitter
+   * is false) — tweets are only ever posted from the final binary-poll path.
+   */
   twitter: string
 }
 
@@ -90,6 +113,13 @@ export interface SummarizeOptions {
   apiKey: string
   githubToken?: string
   logger?: Logger
+  /**
+   * Generate the tweet too. Defaults to false: only the final binary-poll
+   * path tweets, so beta/RC/release webhook paths skip the Twitter AI call
+   * entirely (saves a request and, critically, can't hard-fail the whole
+   * notification on a discarded over-length tweet).
+   */
+  includeTwitter?: boolean
 }
 
 /**
@@ -108,7 +138,13 @@ export async function summarizeReleaseByTag(
   )
 
   if (body && body.trim().length >= MIN_RELEASE_BODY_CHARS) {
-    return summarizeBody(body, opts.tag, opts.apiKey, opts.logger)
+    return summarizeBody(
+      body,
+      opts.tag,
+      opts.apiKey,
+      opts.logger,
+      opts.includeTwitter
+    )
   }
 
   opts.logger?.info('No Release body found, falling back to commit-compare', {
@@ -124,10 +160,11 @@ export async function summarizeBody(
   body: string,
   tag: string,
   apiKey: string,
-  logger?: Logger
+  logger?: Logger,
+  includeTwitter = false
 ): Promise<Summaries> {
   const userMessage = `Summarize rippled ${tag} release notes:\n\n${body}`
-  const twitterInput = `Version: rippled ${tag}\nRelease notes:\n${body}`
+  const twitterInput = `Version: XRP Ledger version ${tag}\nRelease notes:\n${body}`
   return runBothPrompts({
     tag,
     apiKey,
@@ -136,6 +173,7 @@ export async function summarizeBody(
     mattermostUser: userMessage,
     mattermostHeader: `**What's in this release:**`,
     twitterUser: twitterInput,
+    includeTwitter,
     source: 'release-body',
   })
 }
@@ -180,7 +218,8 @@ async function summarizeCommitsSinceLast(
     opts.tag,
     prior.raw,
     opts.apiKey,
-    opts.logger
+    opts.logger,
+    opts.includeTwitter
   )
 }
 
@@ -192,7 +231,8 @@ async function summarizeCommitsList(
   tag: string,
   baseTag: string,
   apiKey: string,
-  logger?: Logger
+  logger?: Logger,
+  includeTwitter = false
 ): Promise<Summaries> {
   const filtered = commits
     .map((c) => ({ ...c, message: c.message.split('\n')[0].trim() }))
@@ -216,7 +256,8 @@ async function summarizeCommitsList(
     mattermostSystem: MATTERMOST_COMMITS_PROMPT,
     mattermostUser: `Summarize commits between rippled ${baseTag} and ${tag}:\n\n${commitList}`,
     mattermostHeader: `**Preliminary changes since \`${baseTag}\`** _(no GitHub Release published yet — summarized from raw commits)_:`,
-    twitterUser: `Version: rippled ${tag} (no GitHub Release published; tagged from develop/release branch)\nCommits since ${baseTag}:\n${commitList}`,
+    twitterUser: `Version: XRP Ledger version ${tag} (no GitHub Release published; tagged from develop/release branch)\nCommits since ${baseTag}:\n${commitList}`,
+    includeTwitter,
     source: `commits-since-${baseTag}`,
   })
 }
@@ -229,10 +270,15 @@ interface RunBothOpts {
   mattermostUser: string
   mattermostHeader: string
   twitterUser: string
+  includeTwitter: boolean
   source: string
 }
 
-/** Fires both AI calls in parallel for low latency. Any failure throws. */
+/**
+ * Generates the Mattermost summary, and the tweet only when includeTwitter
+ * is set (the final binary-poll path). Both AI calls fire in parallel for
+ * low latency. Any failure throws — a partial post would be worse than none.
+ */
 async function runBothPrompts(opts: RunBothOpts): Promise<Summaries> {
   const client = new Anthropic({ apiKey: opts.apiKey })
 
@@ -245,18 +291,20 @@ async function runBothPrompts(opts: RunBothOpts): Promise<Summaries> {
     })
     .then((r) => extractText(r, 'mattermost'))
 
-  const twitterCall = client.messages
-    .create({
-      model: MODEL,
-      max_tokens: MAX_TOKENS_TWITTER,
-      system: TWITTER_PROMPT,
-      messages: [{ role: 'user', content: opts.twitterUser }],
-    })
-    .then((r) => extractText(r, 'twitter'))
+  const twitterCall = opts.includeTwitter
+    ? client.messages
+        .create({
+          model: MODEL,
+          max_tokens: MAX_TOKENS_TWITTER,
+          system: TWITTER_PROMPT,
+          messages: [{ role: 'user', content: opts.twitterUser }],
+        })
+        .then((r) => extractText(r, 'twitter'))
+    : Promise.resolve('')
 
   const [mmText, twText] = await Promise.all([mattermostCall, twitterCall])
 
-  if (twText.length > TWITTER_MAX_CHARS) {
+  if (opts.includeTwitter && twText.length > TWITTER_MAX_CHARS) {
     throw new Error(
       `AI tweet exceeded ${TWITTER_MAX_CHARS} chars (${twText.length}) — refusing to post`
     )
@@ -267,6 +315,7 @@ async function runBothPrompts(opts: RunBothOpts): Promise<Summaries> {
     source: opts.source,
     mattermost_chars: mmText.length,
     twitter_chars: twText.length,
+    tweeted: opts.includeTwitter,
   })
 
   return {

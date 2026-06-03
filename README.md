@@ -189,7 +189,7 @@ Both repos are registered as webhook sources (see [src/github/repos.ts](src/gith
 
 | Source repo | Mattermost copy | Twitter | Content source |
 |---|---|---|---|
-| `XRPLF/rippled` (public) | canonical (blue / orange / green) with full AI summary | yes | release body in payload, falls back to GitHub API (release notes / commit-compare) |
+| `XRPLF/rippled` (public) | canonical (blue / orange / green) with full AI summary | only the FINAL binary-on-stable event (tag pushes & release publishes never tweet) | release body in payload, falls back to GitHub API (release notes / commit-compare) |
 | `XRPLF/xrpld-private` | grey "heads-up" with minimal content (bare tag) or payload-body-summary (release publish) | **never** | webhook payload only — no GitHub API call |
 
 The motivation for the private heads-up: maintainers may cut several RCs on the private mirror before any public push lands, so without a signal the community gets the final public release with no prior warning.
@@ -214,11 +214,11 @@ object happens to live).
 
 ### AI summaries
 
-`ANTHROPIC_API_KEY` is required (the service fails fast at config load if missing). When summarization runs, Claude Haiku 4.5 generates both:
-- A Markdown bullet list for the Mattermost attachment
-- A single tweet (≤270 chars including hashtags) for Twitter
+`ANTHROPIC_API_KEY` is required (the service fails fast at config load if missing). When summarization runs, Claude Haiku 4.5 generates:
+- A Markdown bullet list for the Mattermost attachment (always).
+- A single tweet (≤280 chars including hashtags) for Twitter — **only when the caller passes `includeTwitter` (the final binary-poll path).** Beta/RC tag pushes and release publishes skip the tweet call entirely, so a discarded over-length tweet can never fail their Mattermost post. The tweet refers to the build as "XRP Ledger version X.Y.Z" and ends with `#XRPLedger`.
 
-If either AI call fails — empty response, rate limit, network error, over-length tweet — the whole notification throws and nothing posts. No static fallback copy exists. The Mattermost shells (colors, emoji, pretext, install commands) are real UI structure, not fallback content.
+If a requested AI call fails — empty response, rate limit, network error, over-length tweet — the whole notification throws and nothing posts. No static fallback copy exists. The Mattermost shells (colors, emoji, pretext, install commands) are real UI structure, not fallback content.
 
 Two summarization paths:
 
