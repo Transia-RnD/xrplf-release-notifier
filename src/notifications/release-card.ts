@@ -3,10 +3,15 @@ import path from 'path'
 import { Resvg } from '@resvg/resvg-js'
 
 /**
- * Path to the SVG template, with a single `{{VERSION}}` placeholder.
+ * Path to the SVG template. The version slot is a live `<text>` element
+ * containing the literal string `X.Y.Z`, which we substitute at render
+ * time. `X.Y.Z` was chosen over `{{VERSION}}` because its 5-character
+ * width matches a typical rippled version exactly, so the designer sees
+ * accurate placement in their tool.
+ *
  * Resolved from the source tree so it works both in `npm run serve`
  * (TS source) and in the built `dist/` output (the assets/ dir is
- * copied at build time via the package "files" field / Dockerfile).
+ * copied at build time via the Dockerfile).
  */
 const TEMPLATE_PATH = path.resolve(
   __dirname,
@@ -15,6 +20,8 @@ const TEMPLATE_PATH = path.resolve(
   'assets',
   'release-card-template.svg'
 )
+
+const FONT_DIR = path.resolve(__dirname, '..', '..', 'assets', 'fonts')
 
 let cachedTemplate: string | null = null
 
@@ -38,12 +45,22 @@ function escapeXml(s: string): string {
  * Render the release card for `version` to a PNG buffer.
  *
  * Uses @resvg/resvg-js — native, in-process, no headless browser.
- * Output dimensions come from the SVG's own width/height attrs (1200×675
- * for Twitter's recommended 16:9 in-stream image).
+ * Output dimensions come from the SVG's own width/height attrs.
  */
 export async function renderReleaseCard(version: string): Promise<Buffer> {
   const template = await loadTemplate()
-  const svg = template.replace(/\{\{VERSION\}\}/g, escapeXml(version))
-  const resvg = new Resvg(svg, { fitTo: { mode: 'original' } })
+  const svg = template.replace(/X\.Y\.Z/g, escapeXml(version))
+  // Bundle Roboto Black (900) + Bold (700) so the render matches the
+  // designer's spec on any host. Without these, resvg silently falls back
+  // to a system sans (Arial on macOS, DejaVu on node:20-slim) and the
+  // version text looks much thinner than intended.
+  const resvg = new Resvg(svg, {
+    fitTo: { mode: 'original' },
+    font: {
+      fontDirs: [FONT_DIR],
+      loadSystemFonts: false,
+      defaultFontFamily: 'Roboto',
+    },
+  })
   return resvg.render().asPng()
 }

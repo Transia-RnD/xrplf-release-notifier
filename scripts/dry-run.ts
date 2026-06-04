@@ -8,6 +8,7 @@
  *   npx ts-node scripts/dry-run.ts 3.1.3 --json     # JSON output (machine-readable)
  *   npx ts-node scripts/dry-run.ts 3.2.0 --final    # full FINAL flow: tag → release → binary,
  *                                                   # renders the release-card PNG to /tmp
+ *   npx ts-node scripts/dry-run.ts 3.1.3 --final --live   # ACTUALLY posts the tweet (with image)
  *
  * Comms iteration loop: edit prompts in `src/ai/summarizer.ts` (constants
  * at the top), rebuild (`npm run build`), rerun this script, compare output.
@@ -20,6 +21,7 @@ import type { Summaries } from '../src/ai/summarizer'
 import { summarizeReleaseByTag } from '../src/ai/summarizer'
 import { formatMattermost } from '../src/notifications/mattermost'
 import { renderReleaseCard } from '../src/notifications/release-card'
+import { postToTwitter } from '../src/notifications/twitter'
 import { fetchLatestBinaryVersions } from '../src/poller/binary-checker'
 import { PUBLIC_REPO, repoFullName } from '../src/github/repos'
 import type { VersionInfo } from '../src/version/types'
@@ -32,6 +34,7 @@ const REPO = 'rippled'
 const args = process.argv.slice(2)
 const jsonMode = args.includes('--json')
 const finalMode = args.includes('--final')
+const liveMode = args.includes('--live')
 const tagArg = args.find((a) => !a.startsWith('--'))
 
 async function pickTag(): Promise<string> {
@@ -301,13 +304,60 @@ async function main() {
         `  (${finalTweetText?.length ?? 0}/280 chars, image attached)`
       )
     }
+
+    if (liveMode) {
+      console.log('\n' + '═'.repeat(80))
+      console.log('  ⚠️  LIVE POST — actually tweeting now (with image)')
+      console.log('═'.repeat(80))
+      if (!finalMode) {
+        console.error('  --live requires --final. Aborting.')
+        process.exit(1)
+      }
+      const creds = {
+        appKey: process.env.TWITTER_API_KEY ?? '',
+        appSecret: process.env.TWITTER_API_SECRET ?? '',
+        accessToken: process.env.TWITTER_ACCESS_TOKEN ?? '',
+        accessSecret: process.env.TWITTER_ACCESS_TOKEN_SECRET ?? '',
+      }
+      const missing = Object.entries(creds)
+        .filter(([, v]) => !v || v === 'placeholder')
+        .map(([k]) => k)
+      if (missing.length > 0) {
+        console.error(
+          `  Missing/placeholder Twitter creds: ${missing.join(', ')}`
+        )
+        console.error('  Set them in .env first, then re-run.')
+        process.exit(1)
+      }
+      if (!finalTweetText) {
+        console.error('  No tweet text assembled. Aborting.')
+        process.exit(1)
+      }
+      try {
+        const png = await renderReleaseCard(tag)
+        await postToTwitter(creds, finalTweetText, {
+          buffer: png,
+          mimeType: 'image/png',
+        })
+        console.log('  ✓ Tweet posted successfully.')
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error(`  ✗ Tweet failed: ${msg}`)
+        process.exit(1)
+      }
+    }
+
     console.log('\n' + '═'.repeat(80))
-    console.log(
-      '  Nothing was posted. To iterate, edit prompts in src/ai/summarizer.ts'
-    )
-    console.log(
-      '  and rerun: npm run build && npx ts-node scripts/dry-run.ts ' + tag
-    )
+    if (liveMode) {
+      console.log('  Live post complete. Check your timeline.')
+    } else {
+      console.log(
+        '  Nothing was posted. To iterate, edit prompts in src/ai/summarizer.ts'
+      )
+      console.log(
+        '  and rerun: npm run build && npx ts-node scripts/dry-run.ts ' + tag
+      )
+    }
     console.log('═'.repeat(80) + '\n')
   }
 }
