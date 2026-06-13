@@ -1,14 +1,10 @@
 import Anthropic from '@anthropic-ai/sdk'
 import type { Logger } from 'winston'
 import type { CommitSummary } from '../github/client'
-import {
-  fetchReleaseBody,
-  listVersionTags,
-  compareCommits,
-} from '../github/client'
-import { compareVersions } from '../poller/binary-checker'
+import { fetchReleaseBody, compareCommits } from '../github/client'
+import { findPredecessorTag } from '../version/predecessor'
 
-const MODEL = 'claude-haiku-4-5'
+export const MODEL = 'claude-haiku-4-5'
 const MAX_TOKENS_MATTERMOST = 1024
 const MAX_TOKENS_TWITTER = 200
 
@@ -17,9 +13,32 @@ const TWITTER_MAX_CHARS = 280
 /** Don't summarize tiny release bodies — they're usually just placeholders. */
 export const MIN_RELEASE_BODY_CHARS = 20
 /** Cap commits sent to Claude so large diffs don't blow the prompt. */
-const MAX_COMMITS_FOR_SUMMARY = 80
+export const MAX_COMMITS_FOR_SUMMARY = 80
 
-const MATTERMOST_RELEASE_PROMPT = `You summarize rippled release notes for XRPL node operators.
+// Two variants per source. The LABELED variants emit an explicit "Breaking
+// changes" section and are used wherever NO diff-based detection runs (release
+// publishes, private heads-up, binary poll). The FLAT variants omit that
+// section and are used on the tag-push path, where the authoritative
+// diff-based detector (src/ai/breaking.ts) already prepends a breaking section
+// — a second, message-only one would be redundant and can contradict it.
+
+const MATTERMOST_RELEASE_PROMPT_LABELED = `You summarize rippled release notes for XRPL node operators.
+
+Output TWO labeled sections in markdown, exactly in this shape (use • not -):
+
+**:warning: Breaking changes:**
+• <each SECURITY fix, BREAKING change, or behavior/protocol/amendment change as one bullet>
+
+**Other changes:**
+• <significant new features, then notable bug fixes>
+
+Rules:
+- The "Breaking changes" section lists only changes that require operator/integrator action (API/RPC surface changes, removed/renamed fields, config defaults, consensus/amendment behavior, security fixes). If there are none, that section's single bullet is "• None".
+- "Other changes" holds the rest: 4-8 bullets. Skip routine docs/CI/test-only changes unless that's all that's in the release.
+- Each bullet ≤ 120 chars. Output ONLY the two labeled sections and their bullets — no preamble, no closing remarks.
+- If the release body is empty or boilerplate, output "• None" under Breaking changes and "• No notable changes." under Other changes.`
+
+const MATTERMOST_RELEASE_PROMPT_FLAT = `You summarize rippled release notes for XRPL node operators.
 
 Output 5-10 short bullet points in markdown (using • not -). Rules:
 - Lead with SECURITY fixes and BREAKING / behavior changes.
@@ -29,7 +48,24 @@ Output 5-10 short bullet points in markdown (using • not -). Rules:
 - Each bullet ≤ 120 chars. No preamble, no headings, no closing remarks — just the bullets.
 - If you genuinely can't find anything substantive (release body is empty or boilerplate), output the single bullet: "• No notable changes."`
 
-const MATTERMOST_COMMITS_PROMPT = `You summarize a list of git commits between two rippled tags for XRPL node operators.
+const MATTERMOST_COMMITS_PROMPT_LABELED = `You summarize a list of git commits between two rippled tags for XRPL node operators.
+
+Output TWO labeled sections in markdown, exactly in this shape (use • not -):
+
+**:warning: Breaking changes:**
+• <each SECURITY fix, BREAKING change, or consensus/protocol/amendment change as one bullet>
+
+**Other changes:**
+• <significant new features and behavior changes, then notable bug fixes>
+
+Rules:
+- The "Breaking changes" section lists only changes that require operator/integrator action (API/RPC surface changes, removed/renamed fields, config defaults, consensus/amendment behavior, security fixes). If there are none, that section's single bullet is "• None".
+- "Other changes": group related commits into one bullet — don't restate each commit verbatim. 4-8 bullets.
+- Skip pure CI/test/docs/lint/style/refactor commits, merge commits, "version bump" commits, and "clang-format" commits unless that's all there is.
+- Each bullet ≤ 120 chars. Output ONLY the two labeled sections — no preamble, no "Preliminary changes since…" line, no closing remarks.
+- If nothing substantive is in the commits, output "• None" under Breaking changes and "• No notable changes since the previous version." under Other changes.`
+
+const MATTERMOST_COMMITS_PROMPT_FLAT = `You summarize a list of git commits between two rippled tags for XRPL node operators.
 
 Output 5-10 short bullet points in markdown (using • not -). Rules:
 - Group related commits into one bullet — don't restate each commit verbatim.
@@ -120,6 +156,13 @@ export interface SummarizeOptions {
    * notification on a discarded over-length tweet).
    */
   includeTwitter?: boolean
+  /**
+   * Emit a labeled "Breaking changes" section in the Mattermost summary.
+   * Defaults to true. The tag-push path sets this false: the diff-based
+   * detector (src/ai/breaking.ts) prepends the authoritative breaking section
+   * there, so the narrative must not add a redundant message-only one.
+   */
+  labelBreaking?: boolean
 }
 
 /**
@@ -143,7 +186,8 @@ export async function summarizeReleaseByTag(
       opts.tag,
       opts.apiKey,
       opts.logger,
-      opts.includeTwitter
+      opts.includeTwitter,
+      opts.labelBreaking
     )
   }
 
@@ -161,7 +205,8 @@ export async function summarizeBody(
   tag: string,
   apiKey: string,
   logger?: Logger,
-  includeTwitter = false
+  includeTwitter = false,
+  labelBreaking = true
 ): Promise<Summaries> {
   const userMessage = `Summarize rippled ${tag} release notes:\n\n${body}`
   const twitterInput = `Version: XRP Ledger version ${tag}\nRelease notes:\n${body}`
@@ -169,7 +214,9 @@ export async function summarizeBody(
     tag,
     apiKey,
     logger,
-    mattermostSystem: MATTERMOST_RELEASE_PROMPT,
+    mattermostSystem: labelBreaking
+      ? MATTERMOST_RELEASE_PROMPT_LABELED
+      : MATTERMOST_RELEASE_PROMPT_FLAT,
     mattermostUser: userMessage,
     mattermostHeader: `**What's in this release:**`,
     twitterUser: twitterInput,
@@ -181,20 +228,12 @@ export async function summarizeBody(
 async function summarizeCommitsSinceLast(
   opts: SummarizeOptions
 ): Promise<Summaries> {
-  const tags = await listVersionTags(opts.owner, opts.repo, opts.githubToken)
-
-  const target = opts.tag.replace(/^v/, '')
-  const targetIsFinal = !target.includes('-')
-  const normalized = tags
-    .map((t) => ({ raw: t, normalized: t.replace(/^v/, '') }))
-    .filter((t) => t.normalized !== target)
-
-  const predecessors = normalized
-    .filter((t) => compareVersions(t.normalized, target) < 0)
-    .filter((t) => (targetIsFinal ? !t.normalized.includes('-') : true))
-    .sort((a, b) => compareVersions(a.normalized, b.normalized))
-
-  const prior = predecessors.at(-1)
+  const prior = await findPredecessorTag(
+    opts.owner,
+    opts.repo,
+    opts.tag,
+    opts.githubToken
+  )
   if (!prior) {
     throw new Error(`No predecessor tag found for ${opts.tag}`)
   }
@@ -202,28 +241,29 @@ async function summarizeCommitsSinceLast(
   const commits = await compareCommits(
     opts.owner,
     opts.repo,
-    prior.raw,
+    prior,
     opts.tag,
     opts.githubToken
   )
 
   if (!commits || commits.length === 0) {
     throw new Error(
-      `No commits between ${prior.raw} and ${opts.tag} — refusing to summarize an empty diff`
+      `No commits between ${prior} and ${opts.tag} — refusing to summarize an empty diff`
     )
   }
 
   return summarizeCommitsList(
     commits,
     opts.tag,
-    prior.raw,
+    prior,
     opts.apiKey,
     opts.logger,
-    opts.includeTwitter
+    opts.includeTwitter,
+    opts.labelBreaking
   )
 }
 
-const TRIVIAL_COMMIT =
+export const TRIVIAL_COMMIT =
   /^(merge |bump version|version bump|set version|clang-format|format:)/i
 
 async function summarizeCommitsList(
@@ -232,7 +272,8 @@ async function summarizeCommitsList(
   baseTag: string,
   apiKey: string,
   logger?: Logger,
-  includeTwitter = false
+  includeTwitter = false,
+  labelBreaking = true
 ): Promise<Summaries> {
   const filtered = commits
     .map((c) => ({ ...c, message: c.message.split('\n')[0].trim() }))
@@ -253,7 +294,9 @@ async function summarizeCommitsList(
     tag,
     apiKey,
     logger,
-    mattermostSystem: MATTERMOST_COMMITS_PROMPT,
+    mattermostSystem: labelBreaking
+      ? MATTERMOST_COMMITS_PROMPT_LABELED
+      : MATTERMOST_COMMITS_PROMPT_FLAT,
     mattermostUser: `Summarize commits between rippled ${baseTag} and ${tag}:\n\n${commitList}`,
     mattermostHeader: `**Preliminary changes since \`${baseTag}\`** _(no GitHub Release published yet — summarized from raw commits)_:`,
     twitterUser: `Version: XRP Ledger version ${tag} (no GitHub Release published; tagged from develop/release branch)\nCommits since ${baseTag}:\n${commitList}`,
@@ -324,7 +367,10 @@ async function runBothPrompts(opts: RunBothOpts): Promise<Summaries> {
   }
 }
 
-function extractText(response: Anthropic.Message, channel: string): string {
+export function extractText(
+  response: Anthropic.Message,
+  channel: string
+): string {
   const text = response.content
     .filter((b): b is Anthropic.TextBlock => b.type === 'text')
     .map((b) => b.text)

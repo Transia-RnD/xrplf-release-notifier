@@ -1,0 +1,19 @@
+# XRPL SDK parity targets.
+#
+# This is the WHOLE config: which repos, which branch. Nothing path-shaped or
+# capability-shaped lives here. File locations (definitions.json, the typed-model
+# directories, the registry wiring points) and whether the SDK can inject
+# server_definitions at runtime are all DISCOVERED by the parity agent from each
+# repo itself (see config/parity-skill.md), so a repo refactor never requires a
+# config edit. See config/sdk-architecture.md for human reference on how each SDK
+# is structured today.
+
+rippled:
+  repo: XRPLF/rippled
+
+sdks:
+  - { name: xrpl.js,   repo: XRPLF/xrpl.js,   ref: main }
+  - { name: xrpl-py,   repo: XRPLF/xrpl-py,   ref: main }
+  - { name: xrpl4j,    repo: XRPLF/xrpl4j,    ref: main }
+  - { name: xrpl-rust, repo: XRPLF/xrpl-rust, ref: main }
+  - { name: xrpl-go,   repo: XRPLF/xrpl-go,   ref: main }

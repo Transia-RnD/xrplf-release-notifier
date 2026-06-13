@@ -8,6 +8,7 @@ import type { AppConfig } from '../../../src/config'
 import * as mattermost from '../../../src/notifications/mattermost'
 import * as twitter from '../../../src/notifications/twitter'
 import * as summarizer from '../../../src/ai/summarizer'
+import * as breaking from '../../../src/ai/breaking'
 
 jest.mock('../../../src/github/client')
 jest.mock('../../../src/notifications/mattermost', () => ({
@@ -21,6 +22,9 @@ jest.mock('../../../src/ai/summarizer', () => ({
   MIN_RELEASE_BODY_CHARS: 20,
   summarizeReleaseByTag: jest.fn(),
   summarizeBody: jest.fn(),
+}))
+jest.mock('../../../src/ai/breaking', () => ({
+  summarizeBreakingForTag: jest.fn(),
 }))
 
 const MOCK_SUMMARIES = {
@@ -36,6 +40,13 @@ function primeSummarizerMocks(): void {
     MOCK_SUMMARIES
   )
   ;(summarizer.summarizeBody as jest.Mock).mockResolvedValue(MOCK_SUMMARIES)
+  // Default: no breaking changes. Individual tests override this.
+  ;(breaking.summarizeBreakingForTag as jest.Mock).mockResolvedValue({
+    breakingNow: '',
+    newSurface: '',
+    hasBreakingNow: false,
+    hasNewSurface: false,
+  })
 }
 
 const logger = winston.createLogger({ silent: true })
@@ -106,6 +117,99 @@ describe('handlePushEvent', () => {
     expect(mattermost.postToMattermost).toHaveBeenCalled()
     // Twitter is reserved for the binary-poll path — webhooks never tweet.
     expect(twitter.postToTwitter).not.toHaveBeenCalled()
+  })
+
+  it('composes the breaking-on-upgrade section and escalates to "breaking"', async () => {
+    ;(breaking.summarizeBreakingForTag as jest.Mock).mockResolvedValue({
+      breakingNow: '• Removed RPC field `foo` (abc1234)',
+      newSurface: '',
+      hasBreakingNow: true,
+      hasNewSurface: false,
+    })
+    const payload = withRepo({
+      ref: 'refs/tags/3.2.0-b7',
+      head_commit: { id: 'abc123' },
+    })
+
+    await handlePushEvent(payload, deps)
+
+    const [, source, body, , level] = (mattermost.formatMattermost as jest.Mock)
+      .mock.calls[0]
+    expect(source).toBe('tag')
+    expect(level).toBe('breaking')
+    expect(body).toContain('**:rotating_light: Breaking on upgrade:**')
+    expect(body).toContain('Removed RPC field `foo`')
+    expect(body).toContain('mock bullet') // narrative still appended below
+    // Narrative summary on the tag path must NOT label its own section.
+    expect(summarizer.summarizeReleaseByTag).toHaveBeenCalledWith(
+      expect.objectContaining({ labelBreaking: false })
+    )
+  })
+
+  it('uses the amber "surface" level when only new protocol surface is found', async () => {
+    ;(breaking.summarizeBreakingForTag as jest.Mock).mockResolvedValue({
+      breakingNow: '',
+      newSurface: '• Transaction type `MPTokenIssuanceCreate`',
+      hasBreakingNow: false,
+      hasNewSurface: true,
+    })
+    const payload = withRepo({
+      ref: 'refs/tags/3.2.0-b7',
+      head_commit: { id: 'abc123' },
+    })
+
+    await handlePushEvent(payload, deps)
+
+    const [, , body, , level] = (mattermost.formatMattermost as jest.Mock).mock
+      .calls[0]
+    expect(level).toBe('surface')
+    expect(body).toContain('New protocol surface')
+    expect(body).toContain('`MPTokenIssuanceCreate`')
+    expect(body).not.toContain('Breaking on upgrade')
+  })
+
+  it('stays at level "none" (blue) when nothing is flagged', async () => {
+    const payload = withRepo({
+      ref: 'refs/tags/3.2.0-b7',
+      head_commit: { id: 'abc123' },
+    })
+
+    await handlePushEvent(payload, deps)
+
+    const [, , body, , level] = (mattermost.formatMattermost as jest.Mock).mock
+      .calls[0]
+    expect(level).toBe('none')
+    expect(body).not.toContain('Breaking on upgrade')
+    expect(body).not.toContain('New protocol surface')
+  })
+
+  it('still posts the tag when breaking detection throws', async () => {
+    ;(breaking.summarizeBreakingForTag as jest.Mock).mockRejectedValue(
+      new Error('GitHub 500')
+    )
+    const payload = withRepo({
+      ref: 'refs/tags/3.2.0-b7',
+      head_commit: { id: 'abc123' },
+    })
+
+    const result = await handlePushEvent(payload, deps)
+
+    expect(result.action).toBe('notified')
+    expect(mattermost.postToMattermost).toHaveBeenCalledTimes(1)
+    const [, , , , level] = (mattermost.formatMattermost as jest.Mock).mock
+      .calls[0]
+    expect(level).toBe('none')
+  })
+
+  it('does not run breaking detection on the private tag path', async () => {
+    const payload = withRepo(
+      { ref: 'refs/tags/3.2.0-b7', head_commit: { id: 'abc123' } },
+      PRIVATE_REPO_FULL_NAME
+    )
+
+    await handlePushEvent(payload, deps)
+
+    expect(breaking.summarizeBreakingForTag).not.toHaveBeenCalled()
   })
 
   it('accepts BETA tag with v prefix', async () => {

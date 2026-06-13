@@ -26,6 +26,8 @@ import { PUBLIC_REPO, PRIVATE_REPO, repoFullName } from './github/repos'
 import type { RepoConfig } from './github/repos'
 import { renderReleaseCard } from './notifications/release-card'
 import { postToTwitter } from './notifications/twitter'
+import { runParityCheck } from './parity/runParityCheck'
+import { triggerParityCheck } from './parity/trigger'
 
 const logger = winston.createLogger({
   level: 'info',
@@ -72,6 +74,15 @@ async function start(): Promise<void> {
     asyncHandler((req, res) => handlePoll(req, res, config, storage))
   )
 
+  // Worker endpoint for the SDK feature-parity check. Invoked (fire-and-forget)
+  // by the webhook path via triggerParityCheck — kept separate because the scan
+  // runs an agent per SDK and far outlives the 10s GitHub webhook window.
+  app.post(
+    '/parity',
+    express.json(),
+    asyncHandler((req, res) => handleParity(req, res, config, storage))
+  )
+
   app.get('/', (_req, res) => {
     res.status(200).json({ status: 'ok' })
   })
@@ -109,15 +120,83 @@ async function handleWebhook(
   }
   if (event === 'push') {
     const result = await handlePushEvent(payload, deps)
+    maybeTriggerParity(result, req, config)
     res.status(200).json(result)
     return
   }
   if (event === 'release') {
     const result = await handleReleaseEvent(payload, deps)
+    maybeTriggerParity(result, req, config)
     res.status(200).json(result)
     return
   }
   res.status(200).json({ action: 'ignored', reason: `event: ${event}` })
+}
+
+/**
+ * Kick off a parity check for public tag-push / release-publish events. Only
+ * the public-repo paths (source 'tag' / 'release') are parity-checked — never
+ * the private mirror's embargoed tags. Fire-and-forget: the webhook must return
+ * fast, so we don't await the scan.
+ */
+function maybeTriggerParity(
+  result: { source?: string; version?: string },
+  req: Request,
+  config: AppConfig
+): void {
+  if (
+    (result.source === 'tag' || result.source === 'release') &&
+    result.version
+  ) {
+    const baseUrl =
+      process.env.SELF_URL ??
+      `${req.protocol}://${req.get('host') ?? `localhost:${config.port}`}`
+    void triggerParityCheck(baseUrl, config.pollerToken, result.version, logger)
+  }
+}
+
+async function handleParity(
+  req: Request,
+  res: Response,
+  config: AppConfig,
+  storage: Storage
+): Promise<void> {
+  // Same shared-secret guard as /poll — the worker must only be callable by our
+  // own dispatch (or an operator holding the token).
+  if (config.pollerToken) {
+    const provided = req.headers['x-cloud-scheduler-token']
+    if (provided !== config.pollerToken) {
+      logger.warn('Unauthorized /parity request', { ip: req.ip })
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+  }
+
+  const version = (req.body as { version?: string } | undefined)?.version
+  if (!version) {
+    res.status(400).json({ error: 'missing version' })
+    return
+  }
+
+  let classified: ReturnType<typeof classifyVersion>
+  try {
+    classified = classifyVersion(version.replace(/^v/, ''))
+  } catch {
+    res.status(400).json({ error: 'version does not match pattern' })
+    return
+  }
+
+  const versionInfo: VersionInfo = {
+    ...classified,
+    branch: `parity:${version}`,
+    commitSha: '',
+    commitUrl: '',
+  }
+
+  // Run synchronously within this request — this IS the background job. The
+  // dispatcher already returned to GitHub; here we can take as long as needed.
+  await runParityCheck(versionInfo, { config, storage, logger })
+  res.status(200).json({ action: 'parity_checked', version })
 }
 
 async function handlePoll(

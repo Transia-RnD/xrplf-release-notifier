@@ -78,6 +78,30 @@ The script renders only the scenarios that would actually post for the given ver
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the iteration loop and which files to edit for prompt / copy changes.
 
+## SDK feature-parity check
+
+When rippled cuts a release, each XRPL SDK under XRPLF (xrpl.js, xrpl-py, xrpl4j, xrpl-rust) must add typed support for the new protocol features. This module checks whether they have — and posts a parity report to the same Mattermost channel. It's triggered off the existing public release events (no separate service).
+
+**The key idea: a `definitions.json` diff is not enough.** A wire-name appearing in an SDK's `definitions.json` only proves the feature can be *serialized* — not that the SDK has a typed model, validation, and registry wiring for it. (xrpl-rust's `definitions.json` declares MPToken/Credential/Vault while having zero typed models for them — a definitions diff would falsely call it "at parity".) So the check is **two levels**:
+
+- **Level 1 — serialization:** wire-name present in the SDK's bundled `definitions.json`.
+- **Level 2 — typed support (the real gap):** a typed model exists **and** is wired into the SDK's central registry. Verdict per feature: `supported` / `declared-only` / `missing`, plus an in-progress-PR annotation.
+
+**How it works:**
+- `config/sdks.yaml` lists the target repos (just `repo` + `ref` — nothing path-shaped).
+- `src/parity/reference.ts` parses rippled's tagged protocol macros (`features` / `transactions` / `ledger_entries` / `sfields`) to compute the features **new in this release** vs the predecessor — the checklist.
+- A per-SDK agent runs the repo-agnostic skill in [config/parity-skill.md](config/parity-skill.md) over read-only GitHub tools (`listDir` / `readFile` / `grepFile` / `searchCode` / `listPRs` / `prFiles`). The skill carries the methodology, not file paths, so an SDK refactor never needs a config edit — the agent re-discovers locations and the result is cached (`parity-locations.json` in GCS, keyed by commit SHA). See [config/sdk-architecture.md](config/sdk-architecture.md) for a human snapshot of each SDK's structure.
+- `src/parity/report.ts` posts the report: beta/RC → ⚠️ heads-up; FINAL with any SDK behind → 🔴.
+
+The scan runs an agent per SDK and far outlives GitHub's 10s webhook window, so the webhook dispatches it (fire-and-forget) to an internal `/parity` worker endpoint. Needs `GITHUB_TOKEN` (anonymous GitHub is 60 req/hr) and `ANTHROPIC_API_KEY`.
+
+**Dry-run it (no posting):**
+```bash
+npx ts-node scripts/dry-run.ts 2.2.0 --parity   # build reference, audit each SDK, print the report
+```
+
+**Roadmap (not in the first cut):** open/update tracking issues on lagging SDK repos on beta/RC; a failing status check on FINAL when not at parity; PR comments on SDK PRs touching `definitions.json`. These are deferred because they write to other repos (need `issues:write` / status scope) — the first cut only reads and posts to Mattermost.
+
 ## Deployment
 
 Deployed to GCP Cloud Run via Cloud Build:
@@ -141,11 +165,11 @@ What fires Mattermost vs Twitter, per event × per repo. **`yes` = posts every t
 | Branch push (any ref under `refs/heads/*`) | any | — | — |
 | Tag deletion | any | — | — |
 | Tag not matching version regex (e.g. `smart-escrow-devnet4`) | any | — | — |
-| Tag push `X.Y.Z-bN` (BETA) | public | yes — blue `formatMattermost(TAG)` + AI commit-compare summary | — |
-| Tag push `X.Y.Z-bN` (BETA) | private | yes — grey `formatMattermostPrivateTagHeadsUp`, no body, no link | — |
-| Tag push `X.Y.Z-rcN` (RC) | public | yes — blue `formatMattermost(TAG)` + AI commit-compare summary | — |
+| Tag push `X.Y.Z-bN` (BETA) | public | yes — `formatMattermost(TAG)` + AI commit-compare summary + [amendment-aware breaking-change scan](#breaking-change-detection) (red breaking / amber surface / blue none) | — |
+| Tag push `X.Y.Z-bN` (BETA) | private | yes — grey `formatMattermostPrivateTagHeadsUp`, no body, no link (no diff scan — embargo) | — |
+| Tag push `X.Y.Z-rcN` (RC) | public | yes — `formatMattermost(TAG)` + AI commit-compare summary + breaking-change scan (red/amber/blue) | — |
 | Tag push `X.Y.Z-rcN` (RC) | private | yes — grey `formatMattermostPrivateTagHeadsUp` | — |
-| Tag push `X.Y.Z` (FINAL) | public | yes — blue `formatMattermost(TAG)` + AI commit-compare summary | — |
+| Tag push `X.Y.Z` (FINAL) | public | yes — `formatMattermost(TAG)` + AI commit-compare summary + breaking-change scan (red/amber/blue) | — |
 | Tag push `X.Y.Z` (FINAL) | private | yes — grey `formatMattermostPrivateTagHeadsUp` | — |
 | `release.published` (draft) | any | — | — |
 | `release.published` RC | public | yes — orange `formatMattermost(RELEASE)` + AI body summary | — |
@@ -171,6 +195,39 @@ GitHub Release 3.2.0 published    → 1 Mattermost post  (green release, body su
 If the same release also hits xrpld-private with a tag push and release publish, add **2 more** grey Mattermost heads-ups (no tweets).
 
 An RC ships up to 2 Mattermost posts (tag + release-published) + **0 tweets**. A BETA ships 1 Mattermost post + 0 tweets. Twitter only ever fires for the FINAL binary-on-stable event.
+
+## Breaking-change detection
+
+Every **public tag push** (beta/RC/final) runs an **amendment-aware**, diff-based scan in parallel with the normal summary, and prepends up to two sections to the Mattermost post:
+
+- **🚨 Breaking on upgrade** (red `#E53935`) — unconditional changes that take effect the moment the new binary runs (operators act now). AI-detected.
+- **✨ New protocol surface — SDKs must add support** (amber `#FF9800`) — the new **amendments, transaction types, fields, and ledger objects** an SDK/integrator must implement so users can build/sign/parse them. Deterministic, not inferred.
+
+### The two surfaces (and why they're handled differently)
+
+rippled breaks in two unrelated ways:
+
+1. **Breaking on upgrade** — a change that takes effect *unconditionally* when the binary runs (a serialization change, a default-`api_version` field rename, a config syntax change). This needs judgment, so it's the AI's job. The decisive subtlety: a transactor/consensus change **behind an amendment is inert on release day** (it only activates after 80%/2-week voting flips `rules().enabled(featureX)` true), so it is **not** breaking-on-upgrade. A naive scan that flags every changed `.cpp` produces false positives — the verify stage reads the governing source to confirm there's no gate.
+
+2. **New protocol surface** — what an SDK must *add*. This is **not** the server's internal validation logic (an SDK never replicates enable-gated checks); it's the new wire/representation surface, which is exactly the canonical **definition macros**: `features.macro` (amendments), `transactions.macro` (tx types), `sfields.macro` (fields), `ledger_entries.macro` (ledger objects) — the same surface `ripple-binary-codec` / `definitions.json` encodes. `parseSurfaceChanges` ([`src/ai/breaking-rules.ts`](src/ai/breaking-rules.ts)) reads the added macro lines **deterministically**, so it's exact — no AI, no hedging, no guessing.
+
+The domain rules grounding the AI classifier — gating, API versioning, serialization/TER freezes, additive-vs-breaking — live in `breaking-rules.ts`, researched against the `xrpld` source.
+
+### Pipeline (`src/ai/breaking.ts`)
+
+1. **Context** — resolve the predecessor (`findPredecessorTag`) and `fetchCompare` the diff (commits + file patches).
+2. **New surface (B)** — `parseSurfaceChanges` over the definition-macro diffs. Amendments / tx types / ledger objects are listed; the many new SFields are collapsed to a count + sample (a feature-heavy release like `2.3.0` adds 400+ fields).
+3. **Breaking-on-upgrade (A)** — two-stage AI: Stage 1 lists unconditional-change candidates from priority-path patches; Stage 2 verifies each by fetching the **governing source at the tag** (`getFileAtRef`) to confirm there's no amendment gate, returning a definitive `BREAKING_NOW` / `NOT_BREAKING` verdict. Low-confidence and **hedged** verdicts (contain "may/might/could/…") are dropped.
+
+Colour escalates red (breaking-on-upgrade) → amber (new-surface-only) → blue (nothing). The scan is **best-effort** — any GitHub/AI failure degrades to "no section" and never blocks the tag post. The narrative summary on this path runs with `labelBreaking: false` so it never adds a second, contradictory breaking section. `release.published`, private heads-up, and binary-poll posts have no diff scan and keep their AI-labeled **Breaking changes** / **Other changes** split.
+
+**Scope / future:** `XRPLF/rippled` tags only. The private mirror stays a bare heads-up (embargo). `summarizeBreakingForTag` is repo/trigger-agnostic, so a nightly `develop` scan or private wiring is a small follow-on. The detector is **decoupled** from the SDK parity checker (`src/parity`), which independently tracks whether SDKs implemented the surface. `GITHUB_TOKEN` is recommended (anonymous GitHub is 60 req/hr; the verify stage fetches source files).
+
+Preview any tag's scan without posting:
+
+```
+npx ts-node scripts/dry-run.ts 3.2.0-b7      # shows the BREAKING-CHANGE SCAN block + composed post
+```
 
 ### Twitter image (release card)
 

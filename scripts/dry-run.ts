@@ -9,9 +9,21 @@
  *   npx ts-node scripts/dry-run.ts 3.2.0 --final    # full FINAL flow: tag → release → binary,
  *                                                   # renders the release-card PNG to /tmp
  *   npx ts-node scripts/dry-run.ts 3.1.3 --final --live   # ACTUALLY posts the tweet (with image)
+ *   npx ts-node scripts/dry-run.ts 2.2.0 --parity         # SDK feature-parity report (no posting)
+ *
+ * --base sets the NEW-SURFACE window only; breaking-on-upgrade is ALWAYS vs the
+ * previous tag (small, reliable diff — never the 300-file-capped far diff):
+ *   (default)                                  # surface vs last release · breaking vs previous tag
+ *   npx ts-node scripts/dry-run.ts 3.2.0-b7 --base=last-release  # surface: 3.1.3 → b7 (cumulative)
+ *   npx ts-node scripts/dry-run.ts 3.2.0-b7 --base=last-tag      # surface: b6 → b7 (incremental)
+ *   npx ts-node scripts/dry-run.ts 3.2.0-b7 --base=3.0.0         # surface vs an explicit tag
  *
  * Comms iteration loop: edit prompts in `src/ai/summarizer.ts` (constants
  * at the top), rebuild (`npm run build`), rerun this script, compare output.
+ *
+ * --parity needs ANTHROPIC_API_KEY and GITHUB_TOKEN. It builds the rippled
+ * reference for the tag, runs the parity agent against each configured SDK,
+ * and prints the Mattermost report it WOULD post — nothing is posted or cached.
  */
 import 'dotenv/config'
 import { writeFileSync } from 'fs'
@@ -19,6 +31,8 @@ import axios from 'axios'
 import winston from 'winston'
 import type { Summaries } from '../src/ai/summarizer'
 import { summarizeReleaseByTag } from '../src/ai/summarizer'
+import type { BreakingResult } from '../src/ai/breaking'
+import { summarizeBreakingForTag } from '../src/ai/breaking'
 import { formatMattermost } from '../src/notifications/mattermost'
 import { renderReleaseCard } from '../src/notifications/release-card'
 import { postToTwitter } from '../src/notifications/twitter'
@@ -27,6 +41,17 @@ import { PUBLIC_REPO, repoFullName } from '../src/github/repos'
 import type { VersionInfo } from '../src/version/types'
 import { NotificationSource, VersionType } from '../src/version/types'
 import { classifyVersion } from '../src/version/parser'
+import {
+  findLastFinalTag,
+  findPredecessorTag,
+} from '../src/version/predecessor'
+import { loadParityConfig } from '../src/parity/sdks'
+import { buildReference, deltaChecklist } from '../src/parity/reference'
+import { runSdkAgent } from '../src/parity/runSdkAgent'
+import { computeVerdicts, attachInProgressPRs } from '../src/parity/match'
+import { getFileAtRef } from '../src/github/client'
+import { formatParityReport } from '../src/parity/report'
+import type { SdkReport } from '../src/parity/report'
 
 const OWNER = 'XRPLF'
 const REPO = 'rippled'
@@ -35,7 +60,50 @@ const args = process.argv.slice(2)
 const jsonMode = args.includes('--json')
 const finalMode = args.includes('--final')
 const liveMode = args.includes('--live')
+const parityMode = args.includes('--parity')
 const tagArg = args.find((a) => !a.startsWith('--'))
+// --base=last-release | last-tag | <explicit tag>  → override the NEW-SURFACE
+// window only. Breaking-on-upgrade is always vs the previous tag. Omit for
+// production behaviour (surface vs last stable).
+const baseArg = args.find((a) => a.startsWith('--base='))?.split('=')[1]
+
+const OWNER_REPO = { OWNER: 'XRPLF', REPO: 'rippled' }
+
+/** Resolve --base to a surface baseline tag (undefined = default last stable). */
+async function resolveBase(
+  tag: string
+): Promise<{ surfaceBase?: string | null; label: string }> {
+  const token = process.env.GITHUB_TOKEN
+  const breaking = 'breaking vs previous tag'
+  if (!baseArg) {
+    return { label: `surface vs last release · ${breaking}` }
+  }
+  if (baseArg === 'last-release') {
+    const surfaceBase = await findLastFinalTag(
+      OWNER_REPO.OWNER,
+      OWNER_REPO.REPO,
+      tag,
+      token
+    )
+    return {
+      surfaceBase,
+      label: `surface vs last release (${surfaceBase ?? 'none'}) · ${breaking}`,
+    }
+  }
+  if (baseArg === 'last-tag') {
+    const surfaceBase = await findPredecessorTag(
+      OWNER_REPO.OWNER,
+      OWNER_REPO.REPO,
+      tag,
+      token
+    )
+    return {
+      surfaceBase,
+      label: `surface vs previous tag (${surfaceBase ?? 'none'}) · ${breaking}`,
+    }
+  }
+  return { surfaceBase: baseArg, label: `surface vs ${baseArg} · ${breaking}` }
+}
 
 async function pickTag(): Promise<string> {
   if (tagArg) return tagArg
@@ -110,11 +178,39 @@ function buildScenarios(
   return scenarios
 }
 
-function renderScenario(s: ScenarioRender, summaries: Summaries) {
+function renderScenario(
+  s: ScenarioRender,
+  summaries: Summaries,
+  breaking: BreakingResult
+) {
+  // Only the tag-push path carries the diff-derived sections; compose them and
+  // pick the colour level exactly as the handler does.
+  const isTag = s.source === NotificationSource.TAG
+  const parts: string[] = []
+  if (isTag && breaking.breakingNow) {
+    parts.push(
+      `**:rotating_light: Breaking on upgrade:**\n${breaking.breakingNow}`
+    )
+  }
+  if (isTag && breaking.newSurface) {
+    parts.push(
+      `**:sparkles: New protocol surface — SDKs must add support:**\n${breaking.newSurface}`
+    )
+  }
+  const body = [...parts, summaries.mattermost].join('\n\n')
+  const level = !isTag
+    ? 'none'
+    : breaking.hasBreakingNow
+      ? 'breaking'
+      : breaking.hasNewSurface
+        ? 'surface'
+        : 'none'
   const mattermost = formatMattermost(
     s.versionInfo,
     s.source,
-    summaries.mattermost
+    body,
+    PUBLIC_REPO,
+    level
   )
   const att = mattermost.attachments?.[0]
   // Production tweets ONLY from the final binary-poll path. Tag pushes and
@@ -176,6 +272,33 @@ function printHuman(rendered: ReturnType<typeof renderScenario>[]) {
   }
 }
 
+function printBreaking(
+  tag: string,
+  breaking: BreakingResult,
+  baseLabel: string
+) {
+  console.log('\n' + '═'.repeat(80))
+  console.log(`  BREAKING-CHANGE SCAN — ${tag}  [${baseLabel}]`)
+  console.log('═'.repeat(80))
+  console.log()
+  if (breaking.hasBreakingNow) {
+    console.log('  🚨 Breaking on upgrade (tag post → RED):')
+    breaking.breakingNow.split('\n').forEach((l) => console.log(`    ${l}`))
+    console.log()
+  }
+  if (breaking.hasNewSurface) {
+    console.log(
+      '  ✨ New protocol surface — SDKs must add support' +
+        (breaking.hasBreakingNow ? ':' : ' (tag post → AMBER):')
+    )
+    breaking.newSurface.split('\n').forEach((l) => console.log(`    ${l}`))
+    console.log()
+  }
+  if (!breaking.hasBreakingNow && !breaking.hasNewSurface) {
+    console.log('  ✓ Nothing flagged — tag post stays blue.')
+  }
+}
+
 async function main() {
   const apiKey = process.env.ANTHROPIC_API_KEY
   if (!apiKey) {
@@ -208,19 +331,53 @@ async function main() {
     process.exit(1)
   }
 
-  const summaries = await summarizeReleaseByTag({
-    owner: OWNER,
-    repo: REPO,
-    tag,
-    apiKey,
-    githubToken: process.env.GITHUB_TOKEN,
-    logger,
-    // Only finals produce a tweet (binary-poll path); beta/RC are Mattermost-only.
-    includeTwitter: version.type === VersionType.FINAL,
-  })
+  if (parityMode) {
+    await runParityDryRun(tag, version, logger)
+    return
+  }
+
+  const { surfaceBase: scanBase, label: scanLabel } = await resolveBase(tag)
+
+  // Narrative summary + diff-based breaking scan, in parallel — same as the
+  // tag-push handler. The breaking scan degrades to "none" on any failure.
+  const [summaries, breaking] = await Promise.all([
+    summarizeReleaseByTag({
+      owner: OWNER,
+      repo: REPO,
+      tag,
+      apiKey,
+      githubToken: process.env.GITHUB_TOKEN,
+      logger,
+      // Only finals produce a tweet (binary-poll path); beta/RC are Mattermost-only.
+      includeTwitter: version.type === VersionType.FINAL,
+      // BETA renders the tag-push path, where the diff detector owns the
+      // breaking section; RC/FINAL render release/binary paths that keep the
+      // labeled section. Mirror the handler so the dry-run is faithful.
+      labelBreaking: version.type !== VersionType.BETA,
+    }),
+    summarizeBreakingForTag({
+      owner: OWNER,
+      repo: REPO,
+      tag,
+      apiKey,
+      githubToken: process.env.GITHUB_TOKEN,
+      logger,
+      surfaceBase: scanBase,
+    }).catch((err: unknown) => {
+      logger.warn(
+        `Breaking scan failed: ${err instanceof Error ? err.message : String(err)}`
+      )
+      return {
+        breakingNow: '',
+        newSurface: '',
+        hasBreakingNow: false,
+        hasNewSurface: false,
+      } as BreakingResult
+    }),
+  ])
 
   const scenarios = buildScenarios(version)
-  const rendered = scenarios.map((s) => renderScenario(s, summaries))
+  const rendered = scenarios.map((s) => renderScenario(s, summaries, breaking))
 
   // For --final, render the release card PNG to /tmp, scrape pool/stable
   // to confirm the .deb/.rpm are actually live, and assemble the exact
@@ -259,6 +416,7 @@ async function main() {
         {
           tag,
           summaries,
+          breaking,
           scenarios: rendered,
           ...(finalMode
             ? { releaseCardPath, finalTweetText, binaryStatus }
@@ -269,6 +427,7 @@ async function main() {
       )
     )
   } else {
+    printBreaking(tag, breaking, scanLabel)
     printHuman(rendered)
     if (finalMode) {
       console.log('\n' + '═'.repeat(80))
@@ -360,6 +519,92 @@ async function main() {
     }
     console.log('═'.repeat(80) + '\n')
   }
+}
+
+async function runParityDryRun(
+  tag: string,
+  version: ReturnType<typeof classifyVersion>,
+  logger: winston.Logger
+): Promise<void> {
+  const apiKey = process.env.ANTHROPIC_API_KEY
+  const githubToken = process.env.GITHUB_TOKEN
+  if (!githubToken) {
+    console.error(
+      'GITHUB_TOKEN is required for --parity (anonymous GitHub is 60 req/hr).'
+    )
+    process.exit(1)
+  }
+
+  const parityConfig = loadParityConfig()
+  console.log(`\nBuilding rippled reference for ${tag}…`)
+  const reference = await buildReference({
+    repo: parityConfig.rippled.repo,
+    tag,
+    githubToken,
+    logger,
+  })
+  console.log(
+    `  predecessor: ${reference.predecessorTag ?? '(none)'} — ${reference.added.length} new feature(s) this release`
+  )
+  for (const f of reference.added) console.log(`    + ${f.name} (${f.kind})`)
+  if (reference.addedAmendments.length) {
+    console.log(`  new amendments: ${reference.addedAmendments.join(', ')}`)
+  }
+
+  const checklist = deltaChecklist(reference)
+  const sdks: SdkReport[] = []
+  if (checklist.length > 0) {
+    for (const sdk of parityConfig.sdks) {
+      console.log(`\nAuditing ${sdk.name} (${sdk.repo}@${sdk.ref})…`)
+      try {
+        const inventory = await runSdkAgent({
+          apiKey: apiKey ?? '',
+          repo: sdk.repo,
+          ref: sdk.ref,
+          sdkName: sdk.name,
+          githubToken,
+          logger,
+        })
+        const defPath = inventory.resolvedLocations.definitions
+        const defs = defPath
+          ? await getFileAtRef(sdk.repo, defPath, sdk.ref, githubToken)
+          : null
+        const features = computeVerdicts(checklist, inventory, defs)
+        await attachInProgressPRs(sdk.repo, features, githubToken, logger)
+        const result = {
+          repo: sdk.repo,
+          ref: sdk.ref,
+          resolvedLocations: inventory.resolvedLocations,
+          runtimeDefinitions: inventory.runtimeDefinitions,
+          features,
+          notes: inventory.notes,
+        }
+        sdks.push({ name: sdk.name, repo: sdk.repo, result })
+        if (jsonMode) console.log(JSON.stringify(result, null, 2))
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        console.error(`  ✗ ${sdk.name} failed: ${message}`)
+        sdks.push({ name: sdk.name, repo: sdk.repo, error: message })
+      }
+    }
+  }
+
+  const payload = formatParityReport({
+    versionType: version.type,
+    reference,
+    sdks,
+  })
+  const att = payload.attachments?.[0]
+  console.log('\n' + '═'.repeat(80))
+  console.log('  MATTERMOST PARITY REPORT (not posted)')
+  console.log('═'.repeat(80))
+  console.log(`  Color:   ${att?.color}`)
+  console.log(`  Pretext: ${att?.pretext}`)
+  if (att?.text) {
+    console.log('  Body:')
+    att.text.split('\n').forEach((l) => console.log(`    ${l}`))
+  }
+  console.log('═'.repeat(80) + '\n')
 }
 
 main().catch((err) => {

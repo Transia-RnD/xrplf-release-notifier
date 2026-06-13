@@ -15,6 +15,9 @@ import {
   summarizeBody,
   MIN_RELEASE_BODY_CHARS,
 } from '../ai/summarizer'
+import { summarizeBreakingForTag } from '../ai/breaking'
+import type { BreakingResult } from '../ai/breaking'
+import type { TagBreakingLevel } from '../notifications/mattermost'
 import type { AppConfig } from '../config'
 import type { RepoConfig } from '../github/repos'
 import { findRepoByFullName, repoFullName } from '../github/repos'
@@ -128,22 +131,45 @@ async function handleTagPush(
     }
   }
 
-  const summary = await summarizeReleaseByTag({
-    owner: repo.owner,
-    repo: repo.name,
-    tag: tagName,
-    apiKey: deps.config.anthropicApiKey,
-    githubToken: deps.config.githubToken,
-    logger: deps.logger,
-  })
+  // The narrative summary and the diff-based breaking-change scan run in
+  // parallel. The summary throws on failure (we won't post garbage to the
+  // public channel); the breaking scan degrades to "none" so a diff/AI hiccup
+  // can never suppress the tag notification itself.
+  const [summary, breaking] = await Promise.all([
+    summarizeReleaseByTag({
+      owner: repo.owner,
+      repo: repo.name,
+      tag: tagName,
+      apiKey: deps.config.anthropicApiKey,
+      githubToken: deps.config.githubToken,
+      logger: deps.logger,
+      // The diff-based detector below owns the breaking sections on this path —
+      // don't let the narrative add a redundant, message-only one.
+      labelBreaking: false,
+    }),
+    detectBreakingSafe(tagName, repo, deps),
+  ])
+
+  const parts: string[] = []
+  if (breaking.breakingNow) {
+    parts.push(
+      `**:rotating_light: Breaking on upgrade:**\n${breaking.breakingNow}`
+    )
+  }
+  if (breaking.newSurface) {
+    parts.push(
+      `**:sparkles: New protocol surface — SDKs must add support:**\n${breaking.newSurface}`
+    )
+  }
+  const body = [...parts, summary.mattermost].join('\n\n')
+  const level: TagBreakingLevel = breaking.hasBreakingNow
+    ? 'breaking'
+    : breaking.hasNewSurface
+      ? 'surface'
+      : 'none'
 
   await sendNotifications(
-    formatMattermost(
-      versionInfo,
-      NotificationSource.TAG,
-      summary.mattermost,
-      repo
-    ),
+    formatMattermost(versionInfo, NotificationSource.TAG, body, repo, level),
     { scenario: 'tag', version: classified.raw, repo },
     deps
   )
@@ -274,6 +300,40 @@ export async function handleReleaseEvent(
     type: classified.type,
     source: 'release',
     repo: repoFullName(repo),
+  }
+}
+
+/**
+ * Run the diff-based breaking-change scan, swallowing any failure into a
+ * "no breaking changes" result. A GitHub/AI error here must degrade the post
+ * (drop the breaking section) rather than fail the whole tag notification.
+ */
+async function detectBreakingSafe(
+  tag: string,
+  repo: RepoConfig,
+  deps: HandlerDeps
+): Promise<BreakingResult> {
+  try {
+    return await summarizeBreakingForTag({
+      owner: repo.owner,
+      repo: repo.name,
+      tag,
+      apiKey: deps.config.anthropicApiKey,
+      githubToken: deps.config.githubToken,
+      logger: deps.logger,
+    })
+  } catch (err: unknown) {
+    deps.logger.warn('Breaking-change detection failed — posting without it', {
+      tag,
+      repo: repoFullName(repo),
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return {
+      breakingNow: '',
+      newSurface: '',
+      hasBreakingNow: false,
+      hasNewSurface: false,
+    }
   }
 }
 

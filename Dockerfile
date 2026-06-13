@@ -12,6 +12,7 @@ ENV NODE_ENV=production
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package.json /app/package-lock.json ./
 COPY assets/ ./assets/
+COPY config/ ./config/
 RUN npm ci --omit=dev
 USER node
 EXPOSE 8080

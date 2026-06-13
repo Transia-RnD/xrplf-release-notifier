@@ -30,23 +30,34 @@ const COLOR_RC = '#FF9800'
 const COLOR_FINAL = '#4CAF50'
 const COLOR_TAG = '#2196F3'
 const COLOR_HEADSUP = '#9E9E9E'
+const COLOR_BREAKING = '#E53935'
+const COLOR_GATED = '#FF9800'
 
 /**
  * Build the Mattermost payload for a notification event and append the
  * AI-generated summary bullets to the attachment body.
  */
+/**
+ * Severity of a tag post, driven by the diff-based scan:
+ * - 'breaking' → something breaks for operators on upgrade (red).
+ * - 'surface'  → only new protocol surface; SDKs must add support (amber).
+ * - 'none'     → nothing flagged (blue).
+ */
+export type TagBreakingLevel = 'none' | 'surface' | 'breaking'
+
 export function formatMattermost(
   version: VersionInfo,
   source: NotificationSource,
   summaryMarkdown: string,
-  repo: RepoConfig = PUBLIC_REPO
+  repo: RepoConfig = PUBLIC_REPO,
+  tagLevel: TagBreakingLevel = 'none'
 ): MattermostPayload {
   const payload = (() => {
     switch (source) {
       case NotificationSource.BINARY_POLL:
         return binaryPayload(version)
       case NotificationSource.TAG:
-        return tagPayload(version, repo)
+        return tagPayload(version, repo, tagLevel)
       case NotificationSource.RELEASE:
         return releasePayload(version)
     }
@@ -113,12 +124,18 @@ export async function postToMattermost(
   }
 }
 
-function envelope(
-  attachment: Omit<MattermostAttachment, 'footer' | 'ts'>
+/**
+ * Standard single-attachment Mattermost envelope (notifier identity + footer +
+ * timestamp). Exported so sibling features (e.g. the SDK parity report) post
+ * with the same look. `username`/`icon_url` may be overridden per call.
+ */
+export function envelope(
+  attachment: Omit<MattermostAttachment, 'footer' | 'ts'>,
+  identity?: { username?: string; icon_url?: string }
 ): MattermostPayload {
   return {
-    username: USERNAME,
-    icon_url: ICON_URL,
+    username: identity?.username ?? USERNAME,
+    icon_url: identity?.icon_url ?? ICON_URL,
     attachments: [
       {
         ...attachment,
@@ -143,11 +160,38 @@ function binaryPayload(version: VersionInfo): MattermostPayload {
   })
 }
 
-function tagPayload(version: VersionInfo, repo: RepoConfig): MattermostPayload {
+function tagPayload(
+  version: VersionInfo,
+  repo: RepoConfig,
+  level: TagBreakingLevel = 'none'
+): MattermostPayload {
+  // Escalate the colour and the icon by severity — a glanceable "read this one"
+  // signal in a stream of routine tag posts. 'breaking' = operators act on
+  // upgrade; 'gated' = SDKs must add support before the amendment activates.
+  const repoName = repoFullName(repo)
+  const { color, pretext } = (() => {
+    switch (level) {
+      case 'breaking':
+        return {
+          color: COLOR_BREAKING,
+          pretext: `:rotating_light: rippled \`${version.raw}\` tag has been pushed to \`${repoName}\` — contains breaking changes.`,
+        }
+      case 'surface':
+        return {
+          color: COLOR_GATED,
+          pretext: `:sparkles: rippled \`${version.raw}\` tag has been pushed to \`${repoName}\` — new protocol surface; SDK support needed.`,
+        }
+      case 'none':
+        return {
+          color: COLOR_TAG,
+          pretext: `:label: rippled \`${version.raw}\` tag has been pushed to \`${repoName}\`.`,
+        }
+    }
+  })()
   return envelope({
     fallback: `rippled ${version.raw} tag pushed`,
-    color: COLOR_TAG,
-    pretext: `:label: rippled \`${version.raw}\` tag has been pushed to \`${repoFullName(repo)}\`.`,
+    color,
+    pretext,
     title: 'View commit',
     title_link: version.commitUrl,
   })
