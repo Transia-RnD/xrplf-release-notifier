@@ -28,11 +28,44 @@ import { renderReleaseCard } from './notifications/release-card'
 import { postToTwitter } from './notifications/twitter'
 import { runParityCheck } from './parity/runParityCheck'
 import { triggerParityCheck } from './parity/trigger'
+import { getErrorMessage } from './utils/error'
+
+// Cloud Logging keys log severity off a top-level `severity` field, NOT
+// winston's `level`. Without this mapping every winston log — errors included —
+// lands at severity DEFAULT, so `severity>=ERROR` filters, the console's error
+// view, and Error Reporting all silently miss them. Promote level → severity so
+// errors are actually findable in prod.
+const WINSTON_TO_GCP_SEVERITY: Record<string, string> = {
+  error: 'ERROR',
+  warn: 'WARNING',
+  info: 'INFO',
+  http: 'INFO',
+  verbose: 'DEBUG',
+  debug: 'DEBUG',
+  silly: 'DEBUG',
+}
+const gcpSeverity = winston.format((info) => {
+  info.severity = WINSTON_TO_GCP_SEVERITY[info.level] ?? 'DEFAULT'
+  return info
+})
 
 const logger = winston.createLogger({
   level: 'info',
-  format: winston.format.json(),
+  format: winston.format.combine(gcpSeverity(), winston.format.json()),
   transports: [new winston.transports.Console()],
+})
+
+// Last-resort safety net: a throw outside an Express handler (a stray promise,
+// a bad event callback) would otherwise crash the instance with no structured
+// log. Capture both as ERROR-severity entries so they're never invisible.
+process.on('unhandledRejection', (reason: unknown) => {
+  logger.error('Unhandled promise rejection', {
+    error: getErrorMessage(reason),
+  })
+})
+process.on('uncaughtException', (err: unknown) => {
+  logger.error('Uncaught exception', { error: getErrorMessage(err) })
+  process.exit(1)
 })
 
 const app = express()
@@ -45,7 +78,7 @@ function asyncHandler(
     fn(req, res).catch((err: unknown) => {
       logger.error('Unhandled route error', {
         path: req.path,
-        error: err instanceof Error ? err.message : String(err),
+        error: getErrorMessage(err),
       })
       if (!res.headersSent) {
         res.status(500).json({ error: 'Internal error' })
@@ -322,7 +355,7 @@ async function handlePoll(
       logger.info('Twitter notification sent', { version: newVersion })
     } catch (err: unknown) {
       logger.error('Twitter notification failed', {
-        error: err instanceof Error ? err.message : String(err),
+        error: getErrorMessage(err),
       })
     }
   } else {
@@ -381,7 +414,7 @@ async function resolveBinaryReleaseRepo(
   } catch (err: unknown) {
     logger.warn('Public release lookup failed, falling back to private', {
       tag,
-      error: err instanceof Error ? err.message : String(err),
+      error: getErrorMessage(err),
     })
   }
   return PRIVATE_REPO
