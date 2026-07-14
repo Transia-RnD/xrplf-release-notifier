@@ -53,6 +53,12 @@ for ROLE in roles/cloudbuild.builds.editor roles/storage.admin roles/serviceusag
     --role="$ROLE" --condition=None >/dev/null
 done
 
+# Cloud Build runs API-submitted builds as the Compute Engine default SA, so
+# the deployer must be allowed to act as it.
+gcloud iam service-accounts add-iam-policy-binding "$PN-compute@developer.gserviceaccount.com" \
+  --project=$P --member="serviceAccount:$SA" \
+  --role=roles/iam.serviceAccountUser >/dev/null
+
 # Let workflows from the repo impersonate the deployer SA.
 gcloud iam service-accounts add-iam-policy-binding "$SA" --project=$P \
   --role=roles/iam.workloadIdentityUser \
