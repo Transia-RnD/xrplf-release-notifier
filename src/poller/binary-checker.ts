@@ -3,10 +3,15 @@ import axios from 'axios'
 const DEB_URL = 'https://repos.ripple.com/repos/rippled-deb/pool/stable/'
 const RPM_URL = 'https://repos.ripple.com/repos/rippled-rpm/stable/'
 
+// The package was rebranded rippled -> xrpld as of 3.2.0 (e.g.
+// xrpld_3.2.0-1_amd64.deb). The repo paths are unchanged; match either name so
+// the poller keeps detecting both historical and current releases. Anchored on
+// the version digit so dbgsym/debuginfo siblings (xrpld-dbgsym_, xrpld-debuginfo-)
+// don't match.
 const DEB_REGEX =
-  /href="rippled_(\d+\.\d+\.\d+(?:-[a-z0-9]+)?)-\d+_amd64\.deb"/g
+  /href="(?:rippled|xrpld)_(\d+\.\d+\.\d+(?:-[a-z0-9]+)?)-\d+_amd64\.deb"/g
 const RPM_REGEX =
-  /href="rippled-(\d+\.\d+\.\d+(?:-[a-z0-9]+)?)-\d+\.\w+\.x86_64\.rpm"/g
+  /href="(?:rippled|xrpld)-(\d+\.\d+\.\d+(?:-[a-z0-9]+)?)-\d+\.\w+\.x86_64\.rpm"/g
 
 export interface PollerState {
   deb: { version: string; detectedAt: string } | null

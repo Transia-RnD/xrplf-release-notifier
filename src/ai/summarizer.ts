@@ -1,4 +1,5 @@
-import Anthropic from '@anthropic-ai/sdk'
+import type Anthropic from '@anthropic-ai/sdk'
+import { createAnthropicClient } from './client'
 import type { Logger } from 'winston'
 import type { CommitSummary } from '../github/client'
 import { fetchReleaseBody, compareCommits } from '../github/client'
@@ -22,7 +23,7 @@ export const MAX_COMMITS_FOR_SUMMARY = 80
 // diff-based detector (src/ai/breaking.ts) already prepends a breaking section
 // — a second, message-only one would be redundant and can contradict it.
 
-const MATTERMOST_RELEASE_PROMPT_LABELED = `You summarize rippled release notes for XRPL node operators.
+const MATTERMOST_RELEASE_PROMPT_LABELED = `You summarize xrpld release notes for XRPL node operators.
 
 Output TWO labeled sections in markdown, exactly in this shape (use • not -):
 
@@ -38,7 +39,7 @@ Rules:
 - Each bullet ≤ 120 chars. Output ONLY the two labeled sections and their bullets — no preamble, no closing remarks.
 - If the release body is empty or boilerplate, output "• None" under Breaking changes and "• No notable changes." under Other changes.`
 
-const MATTERMOST_RELEASE_PROMPT_FLAT = `You summarize rippled release notes for XRPL node operators.
+const MATTERMOST_RELEASE_PROMPT_FLAT = `You summarize xrpld release notes for XRPL node operators.
 
 Output 5-10 short bullet points in markdown (using • not -). Rules:
 - Lead with SECURITY fixes and BREAKING / behavior changes.
@@ -48,7 +49,7 @@ Output 5-10 short bullet points in markdown (using • not -). Rules:
 - Each bullet ≤ 120 chars. No preamble, no headings, no closing remarks — just the bullets.
 - If you genuinely can't find anything substantive (release body is empty or boilerplate), output the single bullet: "• No notable changes."`
 
-const MATTERMOST_COMMITS_PROMPT_LABELED = `You summarize a list of git commits between two rippled tags for XRPL node operators.
+const MATTERMOST_COMMITS_PROMPT_LABELED = `You summarize a list of git commits between two xrpld tags for XRPL node operators.
 
 Output TWO labeled sections in markdown, exactly in this shape (use • not -):
 
@@ -65,7 +66,7 @@ Rules:
 - Each bullet ≤ 120 chars. Output ONLY the two labeled sections — no preamble, no "Preliminary changes since…" line, no closing remarks.
 - If nothing substantive is in the commits, output "• None" under Breaking changes and "• No notable changes since the previous version." under Other changes.`
 
-const MATTERMOST_COMMITS_PROMPT_FLAT = `You summarize a list of git commits between two rippled tags for XRPL node operators.
+const MATTERMOST_COMMITS_PROMPT_FLAT = `You summarize a list of git commits between two xrpld tags for XRPL node operators.
 
 Output 5-10 short bullet points in markdown (using • not -). Rules:
 - Group related commits into one bullet — don't restate each commit verbatim.
@@ -78,7 +79,7 @@ Output 5-10 short bullet points in markdown (using • not -). Rules:
 - Output ONLY the bullets — no preamble, no header, no "Preliminary changes since…" line, no closing remarks.
 - If nothing substantive is in the commits, output the single bullet: "• No notable changes since the previous version."`
 
-const TWITTER_PROMPT = `You write tweets (X posts) announcing new releases of the XRP Ledger server software (known internally as "rippled", but NEVER write that word in the tweet).
+const TWITTER_PROMPT = `You write tweets (X posts) announcing new releases of the XRP Ledger server software (known internally as "xrpld", but NEVER write that word in the tweet).
 
 CRITICAL FRAMING — read this twice:
 This tweet ONLY fires AFTER the FINAL X.Y.Z binary packages have shipped on repos.ripple.com (the public stable channel). The reader CAN install RIGHT NOW. This is the "operators, update your nodes" announcement — like a routine deploy notice — not a stay-tuned teaser. Tag is always FINAL (X.Y.Z, no -bN/-rcN suffix).
@@ -99,7 +100,7 @@ fixCleanup3_1_3 amendment fixes NFTs, Vaults, and Lending Protocol. #XRPLedger
 Produce ONE tweet. Hard rules:
 - MAX 195 characters including the hashtag. Count carefully — a "Release notes: https://github.com/XRPLF/rippled/releases/tag/X.Y.Z" line will be appended programmatically, so leave room.
 - End with: #XRPLedger
-- Refer to the release as "XRP Ledger version X.Y.Z" (e.g. "XRP Ledger version 3.1.3"). Never write the word "rippled" or "XRPL" in the tweet.
+- Refer to the release as "XRP Ledger version X.Y.Z" (e.g. "XRP Ledger version 3.1.3"). Never write the word "xrpld" or "XRPL" in the tweet.
 - Use plain hyphens "-" only. Never use em dashes (—) or en dashes (–) anywhere in the tweet.
 - Use action language. Operators should know what to do.
 - NO emojis or other pictographs anywhere in the tweet — plain text only.
@@ -118,7 +119,7 @@ BANNED phrasings (the old "stay tuned" framing is gone):
 - "tagged", "cut", "in flight", "what's brewing"
 - "release notes are live" — that's stale framing from the old release-publish-time tweet. Talk about the BINARIES being live.
 - Package-manager commands in the tweet (apt-get / yum) — they're in the Mattermost post; the tweet is just "update now" energy.
-- The words "rippled" and "XRPL" anywhere in the tweet — always say "XRP Ledger version X.Y.Z".
+- The words "xrpld" and "XRPL" anywhere in the tweet — always say "XRP Ledger version X.Y.Z".
 - Em dashes (—) and en dashes (–) — use a plain hyphen "-" instead.
 - Emojis and pictographs of any kind — the tweet is plain text only.
 
@@ -208,7 +209,7 @@ export async function summarizeBody(
   includeTwitter = false,
   labelBreaking = true
 ): Promise<Summaries> {
-  const userMessage = `Summarize rippled ${tag} release notes:\n\n${body}`
+  const userMessage = `Summarize xrpld ${tag} release notes:\n\n${body}`
   const twitterInput = `Version: XRP Ledger version ${tag}\nRelease notes:\n${body}`
   return runBothPrompts({
     tag,
@@ -297,7 +298,7 @@ async function summarizeCommitsList(
     mattermostSystem: labelBreaking
       ? MATTERMOST_COMMITS_PROMPT_LABELED
       : MATTERMOST_COMMITS_PROMPT_FLAT,
-    mattermostUser: `Summarize commits between rippled ${baseTag} and ${tag}:\n\n${commitList}`,
+    mattermostUser: `Summarize commits between xrpld ${baseTag} and ${tag}:\n\n${commitList}`,
     mattermostHeader: `**Preliminary changes since \`${baseTag}\`** _(no GitHub Release published yet — summarized from raw commits)_:`,
     twitterUser: `Version: XRP Ledger version ${tag} (no GitHub Release published; tagged from develop/release branch)\nCommits since ${baseTag}:\n${commitList}`,
     includeTwitter,
@@ -323,7 +324,7 @@ interface RunBothOpts {
  * low latency. Any failure throws — a partial post would be worse than none.
  */
 async function runBothPrompts(opts: RunBothOpts): Promise<Summaries> {
-  const client = new Anthropic({ apiKey: opts.apiKey })
+  const client = createAnthropicClient(opts.apiKey)
 
   const mattermostCall = client.messages
     .create({

@@ -6,7 +6,7 @@ import { Resvg } from '@resvg/resvg-js'
  * Path to the SVG template. The version slot is a live `<text>` element
  * containing the literal string `X.Y.Z`, which we substitute at render
  * time. `X.Y.Z` was chosen over `{{VERSION}}` because its 5-character
- * width matches a typical rippled version exactly, so the designer sees
+ * width matches a typical xrpld version exactly, so the designer sees
  * accurate placement in their tool.
  *
  * Resolved from the source tree so it works both in `npm run serve`

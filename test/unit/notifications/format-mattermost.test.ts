@@ -31,8 +31,8 @@ describe('formatMattermost (binary poll)', () => {
     )
     const text = mmText(payload)
     expect(text).toContain(':package:')
-    expect(text).toContain('apt-get install rippled=3.1.3-1')
-    expect(text).toContain('yum install rippled-3.1.3')
+    expect(text).toContain('apt-get install xrpld=3.1.3-1')
+    expect(text).toContain('yum install xrpld-3.1.3')
   })
 
   it('does not include commit URL', () => {
@@ -103,7 +103,7 @@ describe('formatMattermost summary appending', () => {
       '**Changes:**\n• A\n• B'
     )
     const text = payload.attachments?.[0]?.text ?? ''
-    expect(text).toContain('apt-get install rippled=3.1.3-1')
+    expect(text).toContain('apt-get install xrpld=3.1.3-1')
     expect(text).toContain('**Changes:**')
     expect(text).toContain('• A')
   })

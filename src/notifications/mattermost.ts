@@ -22,7 +22,7 @@ export interface MattermostPayload {
   attachments?: MattermostAttachment[]
 }
 
-const USERNAME = 'rippled releases'
+const USERNAME = 'xrpld releases'
 const ICON_URL = 'https://eotjzkw.dlvr.cloud/pasted_2.png'
 const FOOTER = 'xrplf-release-notifier'
 
@@ -86,9 +86,9 @@ export function formatMattermostPrivateTagHeadsUp(
     ? ` (\`${version.commitSha.slice(0, 7)}\`)`
     : ''
   return envelope({
-    fallback: `rippled ${version.raw} tag pushed to ${repoFullName(repo)}`,
+    fallback: `xrpld ${version.raw} tag pushed to ${repoFullName(repo)}`,
     color: COLOR_HEADSUP,
-    pretext: `:lock: rippled \`${version.raw}\` tagged on \`${repoFullName(repo)}\`${shaSuffix} — public mirror expected to follow.`,
+    pretext: `:lock: xrpld \`${version.raw}\` tagged on \`${repoFullName(repo)}\`${shaSuffix} — public mirror expected to follow.`,
   })
 }
 
@@ -105,9 +105,9 @@ export function formatMattermostPrivateReleaseHeadsUp(
   summaryMarkdown: string
 ): MattermostPayload {
   const payload = envelope({
-    fallback: `rippled ${version.raw} released on ${repoFullName(repo)}`,
+    fallback: `xrpld ${version.raw} released on ${repoFullName(repo)}`,
     color: COLOR_HEADSUP,
-    pretext: `:lock: rippled \`${version.raw}\` released on \`${repoFullName(repo)}\` — public mirror expected to follow.`,
+    pretext: `:lock: xrpld \`${version.raw}\` released on \`${repoFullName(repo)}\` — public mirror expected to follow.`,
   })
   const att = payload.attachments?.[0]
   if (att) att.text = summaryMarkdown
@@ -148,13 +148,13 @@ export function envelope(
 
 function binaryPayload(version: VersionInfo): MattermostPayload {
   return envelope({
-    fallback: `rippled ${version.raw} binary packages available on repos.ripple.com`,
+    fallback: `xrpld ${version.raw} binary packages available on repos.ripple.com`,
     color: COLOR_FINAL,
-    pretext: `:package: rippled \`${version.raw}\` binary packages are now available!`,
+    pretext: `:package: xrpld \`${version.raw}\` binary packages are now available!`,
     text:
       `Install:\n` +
-      `• \`apt-get install rippled=${version.raw}-1\` (deb)\n` +
-      `• \`yum install rippled-${version.raw}\` (rpm)`,
+      `• \`apt-get install xrpld=${version.raw}-1\` (deb)\n` +
+      `• \`yum install xrpld-${version.raw}\` (rpm)`,
     title: 'repos.ripple.com',
     title_link: 'https://repos.ripple.com',
   })
@@ -174,22 +174,22 @@ function tagPayload(
       case 'breaking':
         return {
           color: COLOR_BREAKING,
-          pretext: `:rotating_light: rippled \`${version.raw}\` tag has been pushed to \`${repoName}\` — contains breaking changes.`,
+          pretext: `:rotating_light: xrpld \`${version.raw}\` tag has been pushed to \`${repoName}\` — contains breaking changes.`,
         }
       case 'surface':
         return {
           color: COLOR_GATED,
-          pretext: `:sparkles: rippled \`${version.raw}\` tag has been pushed to \`${repoName}\` — new protocol surface; SDK support needed.`,
+          pretext: `:sparkles: xrpld \`${version.raw}\` tag has been pushed to \`${repoName}\` — new protocol surface; SDK support needed.`,
         }
       case 'none':
         return {
           color: COLOR_TAG,
-          pretext: `:label: rippled \`${version.raw}\` tag has been pushed to \`${repoName}\`.`,
+          pretext: `:label: xrpld \`${version.raw}\` tag has been pushed to \`${repoName}\`.`,
         }
     }
   })()
   return envelope({
-    fallback: `rippled ${version.raw} tag pushed`,
+    fallback: `xrpld ${version.raw} tag pushed`,
     color,
     pretext,
     title: 'View commit',
@@ -202,17 +202,17 @@ function releasePayload(version: VersionInfo): MattermostPayload {
     version.type === VersionType.BETA || version.type === VersionType.RC
   if (isPrerelease) {
     return envelope({
-      fallback: `rippled ${version.raw} pre-release published on GitHub`,
+      fallback: `xrpld ${version.raw} pre-release published on GitHub`,
       color: COLOR_RC,
-      pretext: `:loudspeaker: rippled \`${version.raw}\` pre-release has been published on GitHub.`,
+      pretext: `:loudspeaker: xrpld \`${version.raw}\` pre-release has been published on GitHub.`,
       title: 'Release notes',
       title_link: version.commitUrl,
     })
   }
   return envelope({
-    fallback: `rippled ${version.raw} release published on GitHub`,
+    fallback: `xrpld ${version.raw} release published on GitHub`,
     color: COLOR_FINAL,
-    pretext: `:loudspeaker: rippled \`${version.raw}\` release has been published on GitHub!`,
+    pretext: `:loudspeaker: xrpld \`${version.raw}\` release has been published on GitHub!`,
     text: 'Node operators: review the release notes and plan your upgrade.',
     title: 'Release notes',
     title_link: version.commitUrl,

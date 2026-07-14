@@ -1,6 +1,6 @@
 /**
  * Runtime domain knowledge — "the skill the AI runs with" — for deciding
- * whether a rippled change is BREAKING ON UPGRADE. Researched against the
+ * whether a xrpld change is BREAKING ON UPGRADE. Researched against the
  * xrpld source; the authoritative mechanisms live in:
  *   - include/xrpl/protocol/TER.h            ("DO NOT CHANGE THESE NUMBERS")
  *   - include/xrpl/protocol/{TxFormats,LedgerFormats}.h  ("hard fork" warnings)
@@ -18,7 +18,7 @@
  * The SDK "new surface" axis is detected separately and deterministically
  * (src/parity/reference.ts buildReference) — do NOT report it here.
  */
-export const BREAKING_RULES = `XRP Ledger / rippled — decide if a change is BREAKING ON UPGRADE (takes effect the moment a node runs the new binary, unconditionally — with NO amendment gate and NO api_version gate). You classify the two breaks that bite on upgrade: node-operator and default-API-consumer. New SDK surface (new tx types/fields/ledger objects) is handled elsewhere — do NOT report it here.
+export const BREAKING_RULES = `XRP Ledger / xrpld — decide if a change is BREAKING ON UPGRADE (takes effect the moment a node runs the new binary, unconditionally — with NO amendment gate and NO api_version gate). You classify the two breaks that bite on upgrade: node-operator and default-API-consumer. New SDK surface (new tx types/fields/ledger objects) is handled elsewhere — do NOT report it here.
 
 Classify BREAKING_NOW only if one of these holds:
 
