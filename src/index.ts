@@ -27,7 +27,6 @@ import { renderReleaseCard } from './notifications/release-card'
 import { postToTwitter } from './notifications/twitter'
 import { runParityCheck } from './parity/runParityCheck'
 import { triggerParityCheck } from './parity/trigger'
-import { triggerSentinelAudit } from './sentinel/trigger'
 import { getErrorMessage } from './utils/error'
 
 // Cloud Logging keys log severity off a top-level `severity` field, NOT
@@ -159,14 +158,12 @@ export async function handleWebhook(
   if (event === 'push') {
     const result = await handlePushEvent(payload, deps)
     maybeTriggerParity(result, req, config)
-    maybeTriggerSentinelAudit(result, config)
     res.status(200).json(result)
     return
   }
   if (event === 'release') {
     const result = await handleReleaseEvent(payload, deps)
     maybeTriggerParity(result, req, config)
-    maybeTriggerSentinelAudit(result, config)
     res.status(200).json(result)
     return
   }
@@ -192,40 +189,6 @@ export function maybeTriggerParity(
       process.env.SELF_URL ??
       `${req.protocol}://${req.get('host') ?? `localhost:${config.port}`}`
     void triggerParityCheck(baseUrl, config.pollerToken, result.version, logger)
-  }
-}
-
-/**
- * Kick off a Sentinel full-repo security audit for public tag-push /
- * release-publish events. Like parity, only the public-repo paths (source
- * 'tag' / 'release') trigger — never the private mirror's embargoed tags, and
- * never duplicating across the public/private fire of the same release.
- *
- * Sentinel owns the rest of the policy (project opt-in, dedup, final-release
- * version-line skip), so we just forward the release facts. Fire-and-forget:
- * the webhook must return fast.
- */
-export function maybeTriggerSentinelAudit(
-  result: { source?: string; version?: string; type?: string; repo?: string },
-  config: AppConfig
-): void {
-  if (
-    (result.source === 'tag' || result.source === 'release') &&
-    result.version &&
-    result.repo
-  ) {
-    const [owner, repo] = result.repo.split('/')
-    if (!owner || !repo) return
-    void triggerSentinelAudit(
-      config,
-      {
-        owner,
-        repo,
-        ref: result.version,
-        versionType: result.type ?? '',
-      },
-      logger
-    )
   }
 }
 

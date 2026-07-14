@@ -4,7 +4,6 @@ import {
   handleParity,
   handlePoll,
   maybeTriggerParity,
-  maybeTriggerSentinelAudit,
   twitterConfigured,
 } from '../../src/index'
 import type { AppConfig } from '../../src/config'
@@ -12,7 +11,6 @@ import * as verify from '../../src/webhook/verify'
 import * as handler from '../../src/webhook/handler'
 import * as parity from '../../src/parity/runParityCheck'
 import * as trigger from '../../src/parity/trigger'
-import * as sentinelTrigger from '../../src/sentinel/trigger'
 import * as binaryChecker from '../../src/poller/binary-checker'
 import * as state from '../../src/poller/state'
 import * as summarizer from '../../src/ai/summarizer'
@@ -192,53 +190,6 @@ describe('maybeTriggerParity', () => {
       cfg()
     )
     maybeTriggerParity({ source: 'tag' }, mockReq(), cfg())
-    expect(trig).not.toHaveBeenCalled()
-  })
-})
-
-describe('maybeTriggerSentinelAudit', () => {
-  it('triggers for a public tag/release with version + repo, forwarding facts', () => {
-    const trig = jest
-      .spyOn(sentinelTrigger, 'triggerSentinelAudit')
-      .mockResolvedValue()
-    maybeTriggerSentinelAudit(
-      {
-        source: 'release',
-        version: '3.2.0-rc1',
-        type: 'rc',
-        repo: 'XRPLF/rippled',
-      },
-      cfg()
-    )
-    expect(trig).toHaveBeenCalledWith(
-      expect.anything(),
-      { owner: 'XRPLF', repo: 'rippled', ref: '3.2.0-rc1', versionType: 'rc' },
-      expect.anything()
-    )
-  })
-
-  it('does not trigger for the private mirror', () => {
-    const trig = jest
-      .spyOn(sentinelTrigger, 'triggerSentinelAudit')
-      .mockResolvedValue()
-    maybeTriggerSentinelAudit(
-      {
-        source: 'tag-private',
-        version: '3.2.0',
-        type: 'rc',
-        repo: 'XRPLF/xrpld-private',
-      },
-      cfg()
-    )
-    expect(trig).not.toHaveBeenCalled()
-  })
-
-  it('does not trigger when version or repo is missing', () => {
-    const trig = jest
-      .spyOn(sentinelTrigger, 'triggerSentinelAudit')
-      .mockResolvedValue()
-    maybeTriggerSentinelAudit({ source: 'tag', type: 'beta' }, cfg())
-    maybeTriggerSentinelAudit({ source: 'tag', version: '3.2.0-b1' }, cfg())
     expect(trig).not.toHaveBeenCalled()
   })
 })
