@@ -22,8 +22,7 @@ import { NotificationSource, VersionType } from './version/types'
 import { formatMattermost } from './notifications/mattermost'
 import { summarizeReleaseByTag } from './ai/summarizer'
 import { fetchReleaseBody } from './github/client'
-import { PUBLIC_REPO, PRIVATE_REPO, repoFullName } from './github/repos'
-import type { RepoConfig } from './github/repos'
+import { PUBLIC_REPO, repoFullName } from './github/repos'
 import { renderReleaseCard } from './notifications/release-card'
 import { postToTwitter } from './notifications/twitter'
 import { runParityCheck } from './parity/runParityCheck'
@@ -69,6 +68,11 @@ process.on('uncaughtException', (err: unknown) => {
 })
 
 const app = express()
+
+// Behind Cloud Run's proxy: honor X-Forwarded-Proto so req.protocol is 'https'.
+// Without this the parity self-POST goes to http://, gets 302-redirected to
+// https, and axios follows the redirect as a GET → 404 (parity job never runs).
+app.set('trust proxy', true)
 
 /** Wraps an async route handler so unhandled rejections become 500s, not crashes. */
 function asyncHandler(
@@ -126,7 +130,7 @@ async function start(): Promise<void> {
   })
 }
 
-async function handleWebhook(
+export async function handleWebhook(
   req: Request,
   res: Response,
   config: AppConfig,
@@ -172,7 +176,7 @@ async function handleWebhook(
  * the private mirror's embargoed tags. Fire-and-forget: the webhook must return
  * fast, so we don't await the scan.
  */
-function maybeTriggerParity(
+export function maybeTriggerParity(
   result: { source?: string; version?: string },
   req: Request,
   config: AppConfig
@@ -188,7 +192,7 @@ function maybeTriggerParity(
   }
 }
 
-async function handleParity(
+export async function handleParity(
   req: Request,
   res: Response,
   config: AppConfig,
@@ -232,7 +236,7 @@ async function handleParity(
   res.status(200).json({ action: 'parity_checked', version })
 }
 
-async function handlePoll(
+export async function handlePoll(
   req: Request,
   res: Response,
   config: AppConfig,
@@ -257,26 +261,49 @@ async function handlePoll(
     )
   }
 
+  // Operators can pass `{ "dryRun": true }` to exercise the FULL pipeline
+  // against production secrets/state/network WITHOUT posting or mutating GCS
+  // state: summarize → format Mattermost → render card → assemble tweet, then
+  // return everything in the response. Add `"version": "X.Y.Z"` to force a
+  // specific final through even when it isn't the newly-detected binary — so
+  // you can validate end-to-end before the .deb/.rpm actually land on stable.
+  const body = (req.body ?? {}) as { dryRun?: boolean; version?: string }
+  const dryRun = body.dryRun === true
+
   const state = await loadPollerState(storage)
   const current = await fetchLatestBinaryVersions()
 
-  // Cold-start guard: if there's no prior state, initialize from current
-  // without notifying. The first poll after a fresh deploy/state-reset must
-  // not announce the existing repos.ripple.com version as "new".
-  const isFirstRun = !state.deb && !state.rpm
-  if (isFirstRun) {
-    const now = new Date().toISOString()
-    if (current.deb) state.deb = { version: current.deb, detectedAt: now }
-    if (current.rpm) state.rpm = { version: current.rpm, detectedAt: now }
-    await savePollerState(storage, state)
-    logger.info('Poller state initialized', { current })
-    res.status(200).json({ action: 'initialized', state })
-    return
+  // Resolve the candidate version. A forced dry-run version bypasses both the
+  // cold-start guard and the new-version diff; every other path mirrors prod.
+  let newVersion: string | null
+  if (dryRun && body.version) {
+    newVersion = body.version.replace(/^v/, '')
+  } else {
+    // Cold-start guard: if there's no prior state, initialize from current
+    // without notifying. The first poll after a fresh deploy/state-reset must
+    // not announce the existing repos.ripple.com version as "new". Dry-run
+    // never persists.
+    const isFirstRun = !state.deb && !state.rpm
+    if (isFirstRun) {
+      const now = new Date().toISOString()
+      if (current.deb) state.deb = { version: current.deb, detectedAt: now }
+      if (current.rpm) state.rpm = { version: current.rpm, detectedAt: now }
+      if (!dryRun) await savePollerState(storage, state)
+      logger.info('Poller state initialized', { current, dryRun })
+      res.status(200).json({
+        action: dryRun ? 'dry_run_initialized' : 'initialized',
+        state,
+      })
+      return
+    }
+    newVersion = detectNewVersions(current, state)
   }
 
-  const newVersion = detectNewVersions(current, state)
   if (!newVersion) {
-    res.status(200).json({ action: 'no_change' })
+    res.status(200).json({
+      action: 'no_change',
+      ...(dryRun ? { dryRun: true, current } : {}),
+    })
     return
   }
 
@@ -285,11 +312,13 @@ async function handlePoll(
   // The poller only scrapes pool/stable/ which should contain only finals.
   // If a non-final shows up there, treat it as an unexpected state and skip
   // — the binary-published tweet ("go install now") would be wrong for
-  // anything that isn't a final.
+  // anything that isn't a final. Dry-run honours the same guard so the report
+  // reflects exactly what prod would do.
   if (classified.type !== VersionType.FINAL) {
     logger.warn('Binary poll saw non-final on stable channel — skipping', {
       version: newVersion,
       type: classified.type,
+      dryRun,
     })
     res.status(200).json({ action: 'ignored', reason: 'non-final on stable' })
     return
@@ -302,15 +331,59 @@ async function handlePoll(
     commitUrl: '',
   }
 
-  // Content source vs posting identity are distinct here. The binary is on
-  // public stable, so the announcement IS public regardless of where the
-  // Release object happens to live. `contentRepo` only steers which GitHub
-  // API we hit for the AI summary; `PUBLIC_REPO` drives dedup + visibility.
-  const contentRepo = await resolveBinaryReleaseRepo(newVersion, config)
-  logger.info('Resolved binary poll content repo', {
-    version: newVersion,
-    contentRepo: repoFullName(contentRepo),
+  // Release-tag gate. The binary-poll announcement is the ONLY tweet we send,
+  // and both it and the public Mattermost post link to the public release
+  // notes (github.com/.../releases/tag/X.Y.Z). Those 404 until the public
+  // GitHub Release is published, so we must not fire before it exists. The two
+  // upstream events arrive in either order and this single gate covers both:
+  //   • binary first  → wait here; GCS state is NOT advanced, so the next poll
+  //                      retries and fires once the Release tag is published.
+  //   • release first → the release-published webhook never tweets (Mattermost
+  //                      only), so when the binary lands the gate is already
+  //                      satisfied and we fire immediately.
+  // `fetchReleaseBody` returns null until a *published* public Release exists
+  // for the tag (drafts aren't served by the tags endpoint), making it a
+  // reliable existence check. It doubles as the content source for the summary.
+  const publicReleaseBody = await fetchReleaseBody(
+    PUBLIC_REPO.owner,
+    PUBLIC_REPO.name,
+    newVersion,
+    config.githubToken
+  ).catch((err: unknown) => {
+    logger.warn(
+      'Public release lookup failed — treating as not-yet-published',
+      {
+        tag: newVersion,
+        error: getErrorMessage(err),
+      }
+    )
+    return null
   })
+  const publicReleaseExists = publicReleaseBody !== null
+
+  if (!publicReleaseExists) {
+    logger.info(
+      'Binary on stable but public GitHub Release not yet published — poll waits',
+      { version: newVersion, dryRun }
+    )
+    res.status(200).json(
+      dryRun
+        ? {
+            action: 'dry_run',
+            version: newVersion,
+            wouldFire: false,
+            publicReleaseExists: false,
+            reason:
+              'public GitHub Release tag not yet published — poll holds until the release exists',
+          }
+        : { action: 'waiting_for_release', version: newVersion }
+    )
+    return
+  }
+
+  // Release exists → public is both the content source and the posting
+  // identity. (`PUBLIC_REPO` drives dedup + visibility.)
+  const contentRepo = PUBLIC_REPO
 
   const summary = await summarizeReleaseByTag({
     owner: contentRepo.owner,
@@ -323,13 +396,49 @@ async function handlePoll(
     includeTwitter: true,
   })
 
+  // Assemble both payloads once — the live path and the dry-run report share
+  // them, so what a dry-run shows is byte-for-byte what prod would send.
+  const mattermostPayload = formatMattermost(
+    versionInfo,
+    NotificationSource.BINARY_POLL,
+    summary.mattermost,
+    PUBLIC_REPO
+  )
+  const releaseNotesUrl = `https://github.com/${repoFullName(PUBLIC_REPO)}/releases/tag/${newVersion}`
+  const tweetText = `${summary.twitter}\n\nRelease notes: ${releaseNotesUrl}`
+
+  // Dry-run: render the card to prove resvg works in this environment, then
+  // return the assembled payloads. Nothing is posted and GCS state is left
+  // untouched, so the real announcement still fires when the binary genuinely
+  // lands. This is the safe "make sure prod will work" path.
+  if (dryRun) {
+    let releaseCard: { bytes: number } | { error: string }
+    try {
+      releaseCard = { bytes: (await renderReleaseCard(newVersion)).length }
+    } catch (err: unknown) {
+      releaseCard = { error: getErrorMessage(err) }
+    }
+    logger.info('Dry-run poll completed — nothing posted', {
+      version: newVersion,
+    })
+    res.status(200).json({
+      action: 'dry_run',
+      version: newVersion,
+      wouldFire: true,
+      publicReleaseExists: true,
+      contentRepo: repoFullName(contentRepo),
+      wouldPostMattermost: true,
+      mattermost: mattermostPayload,
+      wouldTweet: twitterConfigured(config),
+      tweet: tweetText,
+      tweetChars: tweetText.length,
+      releaseCard,
+    })
+    return
+  }
+
   await sendNotifications(
-    formatMattermost(
-      versionInfo,
-      NotificationSource.BINARY_POLL,
-      summary.mattermost,
-      PUBLIC_REPO
-    ),
+    mattermostPayload,
     { scenario: 'binary', version: newVersion, repo: PUBLIC_REPO },
     { config, storage, logger }
   )
@@ -340,8 +449,6 @@ async function handlePoll(
   if (twitterConfigured(config)) {
     try {
       const cardPng = await renderReleaseCard(newVersion)
-      const releaseNotesUrl = `https://github.com/${repoFullName(PUBLIC_REPO)}/releases/tag/${newVersion}`
-      const tweetText = `${summary.twitter}\n\nRelease notes: ${releaseNotesUrl}`
       await postToTwitter(
         {
           appKey: config.twitterApiKey,
@@ -377,20 +484,9 @@ async function handlePoll(
   res.status(200).json({ action: 'notified', version: newVersion })
 }
 
-/**
- * The binary poll has no webhook to tell us which repo cut the release. Try
- * the public repo's GitHub Release first; if there's no Release object there
- * (e.g. it lives only on the private mirror), fall back to private. The
- * fallback still routes notifications correctly because the visibility flag
- * on the returned repo drives Twitter eligibility.
- *
- * For binary-on-stable specifically, public is the right default — binaries
- * only ship on the public repos.ripple.com, so a private-only mirror is
- * unusual but possible during embargo windows.
- */
 /** Same short-circuit the webhook handler used to do — don't let Twitter
  *  401-spam our logs while creds are placeholder. */
-function twitterConfigured(config: AppConfig): boolean {
+export function twitterConfigured(config: AppConfig): boolean {
   return (
     config.twitterApiKey.length > 0 &&
     config.twitterApiKey !== 'placeholder' &&
@@ -399,30 +495,13 @@ function twitterConfigured(config: AppConfig): boolean {
   )
 }
 
-async function resolveBinaryReleaseRepo(
-  tag: string,
-  config: AppConfig
-): Promise<RepoConfig> {
-  try {
-    const publicBody = await fetchReleaseBody(
-      PUBLIC_REPO.owner,
-      PUBLIC_REPO.name,
-      tag,
-      config.githubToken
-    )
-    if (publicBody !== null) return PUBLIC_REPO
-  } catch (err: unknown) {
-    logger.warn('Public release lookup failed, falling back to private', {
-      tag,
-      error: getErrorMessage(err),
-    })
-  }
-  return PRIVATE_REPO
+// Only auto-start when run as the entrypoint — importing this module in tests
+// must not call loadConfig() or bind a port.
+if (require.main === module) {
+  start().catch((err: unknown) => {
+    console.error('Startup failure', err)
+    process.exit(1)
+  })
 }
-
-start().catch((err: unknown) => {
-  console.error('Startup failure', err)
-  process.exit(1)
-})
 
 export { app }
