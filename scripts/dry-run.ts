@@ -299,6 +299,43 @@ function printBreaking(
   }
 }
 
+/**
+ * Show what the webhook would forward to the Sentinel security-audit service.
+ * Public BETA/RC/FINAL tags all POST /reviews; Sentinel itself decides whether
+ * to actually run (project opt-in, exact-ref dedup, and — for FINAL — skipping a
+ * version line an earlier rc already audited).
+ */
+function printSentinel(
+  tag: string,
+  version: ReturnType<typeof classifyVersion>
+) {
+  console.log('\n' + '═'.repeat(80))
+  console.log('  SENTINEL AUDIT — POST {SENTINEL_BASE_URL}/reviews')
+  console.log('═'.repeat(80))
+  console.log()
+  console.log(
+    '  Payload:  ' +
+      JSON.stringify({
+        owner: PUBLIC_REPO.owner,
+        repo: PUBLIC_REPO.name,
+        ref: tag,
+        versionType: version.type,
+      })
+  )
+  if (version.type === VersionType.FINAL) {
+    console.log(
+      `  Note:     FINAL — Sentinel skips this if version line ${version.major}.${version.minor}.${version.patch} was already audited (e.g. an rc).`
+    )
+  } else {
+    console.log(
+      '  Note:     prerelease — always forwarded; Sentinel gates on project opt-in + exact-ref dedup.'
+    )
+  }
+  console.log(
+    '  Disabled when SENTINEL_BASE_URL / SENTINEL_API_TOKEN are unset.'
+  )
+}
+
 async function main() {
   const apiKey = process.env.ANTHROPIC_API_KEY
   if (!apiKey) {
@@ -429,6 +466,7 @@ async function main() {
   } else {
     printBreaking(tag, breaking, scanLabel)
     printHuman(rendered)
+    printSentinel(tag, version)
     if (finalMode) {
       console.log('\n' + '═'.repeat(80))
       console.log('  BINARY POLL — repos.ripple.com/pool/stable/')

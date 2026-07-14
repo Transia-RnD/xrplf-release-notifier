@@ -18,6 +18,10 @@ export interface AppConfig {
   anthropicApiKey: string
   pollerToken?: string
   gcpProjectId: string
+  // Sentinel security-audit service. When both are set, prerelease (beta/rc)
+  // and not-yet-audited final tags trigger a full-repo audit via POST /reviews.
+  sentinelBaseUrl?: string
+  sentinelApiToken?: string
 }
 
 interface AppSecrets {
@@ -30,6 +34,8 @@ interface AppSecrets {
   TWITTER_ACCESS_TOKEN_SECRET: string
   ANTHROPIC_API_KEY: string
   POLLER_TOKEN?: string
+  SENTINEL_BASE_URL?: string
+  SENTINEL_API_TOKEN?: string
 }
 
 export async function loadConfig(): Promise<AppConfig> {
@@ -52,6 +58,8 @@ export async function loadConfig(): Promise<AppConfig> {
     anthropicApiKey: requireEnv('ANTHROPIC_API_KEY'),
     pollerToken: process.env.POLLER_TOKEN,
     gcpProjectId,
+    sentinelBaseUrl: process.env.SENTINEL_BASE_URL,
+    sentinelApiToken: process.env.SENTINEL_API_TOKEN,
   }
 }
 
@@ -85,5 +93,7 @@ async function loadFromSecretManager(
     anthropicApiKey: secrets.ANTHROPIC_API_KEY,
     pollerToken: secrets.POLLER_TOKEN,
     gcpProjectId,
+    sentinelBaseUrl: secrets.SENTINEL_BASE_URL,
+    sentinelApiToken: secrets.SENTINEL_API_TOKEN,
   }
 }
