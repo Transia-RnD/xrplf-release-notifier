@@ -21,6 +21,7 @@ import type { TagBreakingLevel } from '../notifications/mattermost'
 import type { AppConfig } from '../config'
 import type { RepoConfig } from '../github/repos'
 import { findRepoByFullName, repoFullName } from '../github/repos'
+import { tagFloodGuard, formatTagFloodNotice } from './floodGuard'
 import {
   PushEventSchema,
   ReleaseEventSchema,
@@ -91,6 +92,34 @@ async function handleTagPush(
     classified = classifyVersion(tagName)
   } catch {
     return { action: 'ignored', reason: 'tag does not match version pattern' }
+  }
+
+  // Bulk tag backfills (mirror/tag syncs) fire one webhook per tag; past the
+  // guard's limit we post a single flood notice instead of one post per tag.
+  const flood = tagFloodGuard.check(repoFullName(repo))
+  if (!flood.allowed) {
+    if (flood.announceSuppression) {
+      await sendNotifications(
+        formatTagFloodNotice(
+          repoFullName(repo),
+          flood.recentCount,
+          tagFloodGuard.windowMs
+        ),
+        { scenario: 'tag-flood', version: classified.raw, repo },
+        deps
+      )
+    }
+    deps.logger.warn('Tag flood guard suppressed tag notification', {
+      repo: repoFullName(repo),
+      version: classified.raw,
+      recentCount: flood.recentCount,
+    })
+    return {
+      action: 'suppressed',
+      reason: 'tag flood guard',
+      version: classified.raw,
+      repo: repoFullName(repo),
+    }
   }
 
   // Every version type fires on tag push — BETA, RC, and FINAL all post.

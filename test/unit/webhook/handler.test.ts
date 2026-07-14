@@ -4,6 +4,7 @@ import {
   handlePushEvent,
   handleReleaseEvent,
 } from '../../../src/webhook/handler'
+import { tagFloodGuard } from '../../../src/webhook/floodGuard'
 import type { AppConfig } from '../../../src/config'
 import * as mattermost from '../../../src/notifications/mattermost'
 import * as twitter from '../../../src/notifications/twitter'
@@ -77,6 +78,7 @@ function withRepo<T extends Record<string, unknown>>(
 
 describe('handlePushEvent', () => {
   beforeEach(() => {
+    tagFloodGuard.reset()
     ;(mattermost.postToMattermost as jest.Mock).mockResolvedValue(undefined)
     ;(twitter.postToTwitter as jest.Mock).mockResolvedValue(undefined)
     primeSummarizerMocks()
@@ -281,6 +283,7 @@ describe('handlePushEvent', () => {
 
 describe('handleReleaseEvent', () => {
   beforeEach(() => {
+    tagFloodGuard.reset()
     ;(mattermost.postToMattermost as jest.Mock).mockResolvedValue(undefined)
     ;(twitter.postToTwitter as jest.Mock).mockResolvedValue(undefined)
     primeSummarizerMocks()
@@ -355,6 +358,7 @@ describe('handleReleaseEvent', () => {
 
 describe('dual-repo behavior', () => {
   beforeEach(() => {
+    tagFloodGuard.reset()
     ;(mattermost.postToMattermost as jest.Mock).mockResolvedValue(undefined)
     ;(twitter.postToTwitter as jest.Mock).mockResolvedValue(undefined)
     primeSummarizerMocks()
