@@ -55,6 +55,20 @@ function notAtParity(r: SdkParityResult): FeatureVerdict[] {
   return r.features.filter((f) => f.level2 !== 'supported')
 }
 
+/** One bullet per gap (emoji + name + kind + verdict + optional PR), capped. */
+function formatGapLines(gaps: FeatureVerdict[]): string {
+  const lines = gaps.slice(0, MAX_FEATURE_LINES).map((f) => {
+    const pr = f.inProgressPR
+      ? ` — PR #${f.inProgressPR.number} in progress`
+      : ''
+    return `${verdictEmoji(f.level2)} \`${f.name}\` (${KIND_LABEL[f.kind]}): ${f.level2}${pr}`
+  })
+  if (gaps.length > MAX_FEATURE_LINES) {
+    lines.push(`…and ${gaps.length - MAX_FEATURE_LINES} more`)
+  }
+  return lines.join('\n')
+}
+
 function renderSdk(sdk: SdkReport): string {
   if (sdk.error) {
     return `**${sdk.name}** — ⚠️ check failed: ${sdk.error}`
@@ -67,16 +81,7 @@ function renderSdk(sdk: SdkReport): string {
     return `**${sdk.name}** — ✅ at parity`
   }
 
-  const lines = gaps.slice(0, MAX_FEATURE_LINES).map((f) => {
-    const pr = f.inProgressPR
-      ? ` — PR #${f.inProgressPR.number} in progress`
-      : ''
-    return `${verdictEmoji(f.level2)} \`${f.name}\` (${KIND_LABEL[f.kind]}): ${f.level2}${pr}`
-  })
-  if (gaps.length > MAX_FEATURE_LINES) {
-    lines.push(`…and ${gaps.length - MAX_FEATURE_LINES} more`)
-  }
-  return `**${sdk.name}** — ⚠️ ${gaps.length} gap${gaps.length === 1 ? '' : 's'}\n${lines.join('\n')}`
+  return `**${sdk.name}** — ⚠️ ${gaps.length} gap${gaps.length === 1 ? '' : 's'}\n${formatGapLines(gaps)}`
 }
 
 function renderSdkFull(sdk: SdkReport): string {
@@ -97,16 +102,7 @@ function renderSdkFull(sdk: SdkReport): string {
   }
 
   const gaps = notAtParity(result)
-  const lines = gaps.slice(0, MAX_FEATURE_LINES).map((f) => {
-    const pr = f.inProgressPR
-      ? ` — PR #${f.inProgressPR.number} in progress`
-      : ''
-    return `${verdictEmoji(f.level2)} \`${f.name}\` (${KIND_LABEL[f.kind]}): ${f.level2}${pr}`
-  })
-  if (gaps.length > MAX_FEATURE_LINES) {
-    lines.push(`…and ${gaps.length - MAX_FEATURE_LINES} more`)
-  }
-  return `**${sdk.name}** — ${supported}/${total} types supported, ${gaps.length} gap${gaps.length === 1 ? '' : 's'}${fieldsLine}\n${lines.join('\n')}`
+  return `**${sdk.name}** — ${supported}/${total} types supported, ${gaps.length} gap${gaps.length === 1 ? '' : 's'}${fieldsLine}\n${formatGapLines(gaps)}`
 }
 
 function formatFullReport(input: FormatParityReportInput): MattermostPayload {
@@ -121,9 +117,9 @@ function formatFullReport(input: FormatParityReportInput): MattermostPayload {
   const body = sdks.map(renderSdkFull).join('\n\n')
   return envelope(
     {
-      fallback: `Full SDK parity audit vs rippled ${tag}`,
+      fallback: `Full SDK parity audit vs xrpld ${tag}`,
       color: anyBehind ? COLOR_WARN : COLOR_OK,
-      pretext: `:clipboard: Full SDK parity audit vs rippled \`${tag}\` — ${typeCount} transaction types.`,
+      pretext: `:clipboard: Full SDK parity audit vs xrpld \`${tag}\` — ${typeCount} transaction types.`,
       text: body,
     },
     { username: USERNAME }
@@ -145,9 +141,9 @@ export function formatParityReport(
   if (reference.baselineMissing) {
     return envelope(
       {
-        fallback: `SDK parity: rippled ${tag} — no predecessor baseline`,
+        fallback: `SDK parity: xrpld ${tag} — no predecessor baseline`,
         color: COLOR_NEUTRAL,
-        pretext: `:information_source: SDK parity — couldn't establish a parseable predecessor baseline for rippled \`${tag}\` (predecessor \`${reference.predecessorTag ?? 'none'}\` predates the protocol macro layout). Skipping per-feature parity.`,
+        pretext: `:information_source: SDK parity — couldn't establish a parseable predecessor baseline for xrpld \`${tag}\` (predecessor \`${reference.predecessorTag ?? 'none'}\` predates the protocol macro layout). Skipping per-feature parity.`,
       },
       { username: USERNAME }
     )
@@ -157,9 +153,9 @@ export function formatParityReport(
   if (reference.added.length === 0) {
     return envelope(
       {
-        fallback: `SDK parity: rippled ${tag} adds no new protocol features`,
+        fallback: `SDK parity: xrpld ${tag} adds no new protocol features`,
         color: COLOR_NEUTRAL,
-        pretext: `:information_source: SDK parity — rippled \`${tag}\` introduces no new transaction types, ledger entries, or fields vs \`${reference.predecessorTag ?? 'previous'}\`. Nothing to check.`,
+        pretext: `:information_source: SDK parity — xrpld \`${tag}\` introduces no new transaction types, ledger entries, or fields vs \`${reference.predecessorTag ?? 'previous'}\`. Nothing to check.`,
       },
       { username: USERNAME }
     )
@@ -189,9 +185,9 @@ export function formatParityReport(
 
   return envelope(
     {
-      fallback: `SDK parity report for rippled ${tag}`,
+      fallback: `SDK parity report for xrpld ${tag}`,
       color,
-      pretext: `${icon} SDK parity: rippled ${verb}.`,
+      pretext: `${icon} SDK parity: xrpld ${verb}.`,
       text: `New in \`${tag}\`: ${addedSummary}\n\n${body}`,
     },
     { username: USERNAME }

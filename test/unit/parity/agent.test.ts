@@ -78,4 +78,92 @@ describe('runSdkAgent (inventory)', () => {
       runSdkAgent({ apiKey: 'test', repo: 'XRPLF/xrpl.js', ref: 'main' })
     ).rejects.toThrow()
   })
+
+  it('injects the per-SDK profile into the system prompt when sdkName is set', async () => {
+    createMock.mockResolvedValueOnce({
+      content: [
+        toolUse('t1', 'submit_inventory', {
+          repo: 'XRPLF/xrpl-rust',
+          ref: 'main',
+          resolvedLocations: { definitions: null, models: [], registries: [] },
+          typedTransactionTypes: [],
+        }),
+      ],
+    })
+
+    await runSdkAgent({
+      apiKey: 'k',
+      repo: 'XRPLF/xrpl-rust',
+      ref: 'main',
+      sdkName: 'xrpl-rust',
+    })
+
+    // The real config/sdk-skills/xrpl-rust.md profile is appended to the base skill.
+    const calls = createMock.mock.calls as unknown as [{ system: string }][]
+    const system = calls[0][0].system
+    expect(system).toContain('Profile for this SDK')
+    expect(system).toContain('TransactionType') // from xrpl-rust.md profile
+    expect(system).toContain('mod.rs')
+  })
+
+  it('nudges the model when it goes idle, then accepts the inventory', async () => {
+    // First turn: no tool_use (model "thinks"); second turn: submits.
+    createMock
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'looking…' }] })
+      .mockResolvedValueOnce({
+        content: [
+          toolUse('t1', 'submit_inventory', {
+            repo: 'XRPLF/xrpl.js',
+            ref: 'main',
+            resolvedLocations: {
+              definitions: null,
+              models: [],
+              registries: [],
+            },
+            typedTransactionTypes: ['Payment'],
+          }),
+        ],
+      })
+    const inv = await runSdkAgent({
+      apiKey: 'k',
+      repo: 'XRPLF/xrpl.js',
+      ref: 'main',
+    })
+    expect(createMock).toHaveBeenCalledTimes(2)
+    expect(inv.typedTransactionTypes).toEqual(['Payment'])
+  })
+
+  it('throws if the model never submits within the iteration budget', async () => {
+    // Always idle — exhausts MAX_ITERATIONS.
+    createMock.mockResolvedValue({
+      content: [{ type: 'text', text: 'still…' }],
+    })
+    await expect(
+      runSdkAgent({ apiKey: 'k', repo: 'XRPLF/x', ref: 'main' })
+    ).rejects.toThrow(/without submitting/)
+  })
+
+  it('omits the profile section for an SDK with no profile file', async () => {
+    createMock.mockResolvedValueOnce({
+      content: [
+        toolUse('t1', 'submit_inventory', {
+          repo: 'XRPLF/nope',
+          ref: 'main',
+          resolvedLocations: { definitions: null, models: [], registries: [] },
+          typedTransactionTypes: [],
+        }),
+      ],
+    })
+
+    await runSdkAgent({
+      apiKey: 'k',
+      repo: 'XRPLF/nope',
+      ref: 'main',
+      sdkName: 'no-such-sdk',
+    })
+
+    const calls = createMock.mock.calls as unknown as [{ system: string }][]
+    const system = calls[0][0].system
+    expect(system).not.toContain('Profile for this SDK')
+  })
 })

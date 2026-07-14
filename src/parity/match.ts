@@ -1,5 +1,6 @@
 import type { Logger } from 'winston'
 import { listPullRequests } from '../github/client'
+import { getErrorMessage } from '../utils/error'
 import type { Feature } from './reference'
 import type { FeatureVerdict, SdkInventory } from './runSdkAgent'
 
@@ -87,7 +88,7 @@ export async function attachInProgressPRs(
   } catch (err: unknown) {
     logger?.warn('Could not list PRs for in-progress detection', {
       repo,
-      error: err instanceof Error ? err.message : String(err),
+      error: getErrorMessage(err),
     })
     return
   }

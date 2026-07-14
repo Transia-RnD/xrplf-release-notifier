@@ -11,6 +11,7 @@ import type { Reference, Feature } from './reference'
 import { runSdkAgent } from './runSdkAgent'
 import type { SdkParityResult } from './runSdkAgent'
 import { computeVerdicts, attachInProgressPRs } from './match'
+import { getErrorMessage } from '../utils/error'
 import { resolveRefSha, getFileAtRef } from '../github/client'
 import {
   loadLocationsCache,
@@ -118,7 +119,7 @@ export async function runParityCheck(
         await saveLocationsCache(storage, cache)
       } catch (err: unknown) {
         logger.warn('Failed to persist parity locations cache', {
-          error: err instanceof Error ? err.message : String(err),
+          error: getErrorMessage(err),
         })
       }
     }
@@ -151,7 +152,7 @@ export async function runParityCheck(
   } catch (err: unknown) {
     logger.error('Parity check failed', {
       tag,
-      error: err instanceof Error ? err.message : String(err),
+      error: getErrorMessage(err),
     })
     return undefined
   }
@@ -236,7 +237,7 @@ async function auditSdk(
 
     return { name: sdk.name, repo: sdk.repo, result, fieldsLevel1 }
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err)
+    const message = getErrorMessage(err)
     logger.error('Parity agent failed for SDK', {
       repo: sdk.repo,
       error: message,

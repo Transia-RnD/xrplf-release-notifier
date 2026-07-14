@@ -1,5 +1,6 @@
 import axios from 'axios'
 import type { Logger } from 'winston'
+import { getErrorMessage } from '../utils/error'
 
 /**
  * Fire-and-forget dispatch of a parity job to the service's own /parity worker
@@ -38,7 +39,7 @@ export async function triggerParityCheck(
     }
     logger.warn('Failed to dispatch parity job', {
       version,
-      error: err instanceof Error ? err.message : String(err),
+      error: getErrorMessage(err),
     })
   }
 }

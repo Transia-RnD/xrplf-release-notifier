@@ -1,12 +1,14 @@
 import { readFileSync } from 'fs'
 import path from 'path'
-import Anthropic from '@anthropic-ai/sdk'
+import type Anthropic from '@anthropic-ai/sdk'
 import type { Logger } from 'winston'
 import { z } from 'zod'
 import { TOOLS, executeTool } from './githubTools'
 import type { ToolContext } from './githubTools'
 import type { SdkLocations } from './cache'
 import { getFileAtRef } from '../github/client'
+import { createAnthropicClient } from '../ai/client'
+import { getErrorMessage } from '../utils/error'
 
 /**
  * Runs the inventory skill against one SDK via an Anthropic tool-use loop. The
@@ -185,9 +187,9 @@ function buildUserMessage(opts: RunSdkAgentOptions): string {
 export async function runSdkAgent(
   opts: RunSdkAgentOptions
 ): Promise<SdkInventory> {
-  // maxRetries above the SDK default (2) so a transient 429 self-heals via the
-  // SDK's Retry-After backoff rather than failing the whole SDK.
-  const client = new Anthropic({ apiKey: opts.apiKey, maxRetries: 6 })
+  // Extra retry headroom: the agent makes many sequential calls, so a transient
+  // 429 should self-heal rather than fail the whole SDK.
+  const client = createAnthropicClient(opts.apiKey, 6)
   const ctx: ToolContext = {
     repo: opts.repo,
     ref: opts.ref,
@@ -244,7 +246,7 @@ export async function runSdkAgent(
           ctx
         )
       } catch (err: unknown) {
-        content = `Tool error: ${err instanceof Error ? err.message : String(err)}`
+        content = `Tool error: ${getErrorMessage(err)}`
       }
       toolResults.push({
         type: 'tool_result',
