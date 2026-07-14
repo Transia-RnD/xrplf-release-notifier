@@ -14,9 +14,11 @@ function makeReference(overrides: Partial<Reference> = {}): Reference {
       ledgerEntryTypes: [],
       fields: [],
       amendments: [],
+      unsupportedAmendments: [],
     },
     added: [{ name: 'MPTokenIssuanceCreate', kind: 'transactionType' }],
     addedAmendments: ['MPTokensV2'],
+    addedUnsupportedAmendments: [],
     baselineMissing: false,
     ...overrides,
   }
@@ -134,6 +136,7 @@ describe('formatParityReport', () => {
         ledgerEntryTypes: ['MPTokenIssuance'],
         fields: ['A', 'B', 'C'],
         amendments: [],
+        unsupportedAmendments: [],
       },
     })
     const sdks: SdkReport[] = [

@@ -24,8 +24,14 @@ export interface FeatureSets {
   transactionTypes: string[]
   ledgerEntryTypes: string[]
   fields: string[]
-  /** Amendment names — context only (no SDK models amendments); also seeds PR stems. */
+  /** Votable amendment names (Supported::Yes) — context only; also seeds PR stems. */
   amendments: string[]
+  /**
+   * Amendment names present in the macro but shipped `Supported::No` — built into
+   * the binary yet NOT votable, so the network cannot enable them. Tracked so a
+   * release that adds one can be flagged instead of silently claiming support.
+   */
+  unsupportedAmendments: string[]
 }
 
 export interface Reference {
@@ -36,8 +42,16 @@ export interface Reference {
   full: FeatureSets
   /** Features present in `tag` but not in the predecessor — the actionable checklist. */
   added: Feature[]
-  /** Amendments new in this release (context for the report). */
+  /** Votable amendments (Supported::Yes) new in this release (context for the report). */
   addedAmendments: string[]
+  /**
+   * Amendments whose name is new in this release but shipped `Supported::No` —
+   * code is present but the network cannot vote them in. These are the gap that
+   * lets release notes overstate support (e.g. MPTokensV2 in 3.2.0): the feature
+   * looks delivered in the diff, yet the amendment is unvotable. Surfaced as an
+   * explicit alert so a reviewer confirms the notes don't claim it's available.
+   */
+  addedUnsupportedAmendments: string[]
   /**
    * True when we couldn't establish a parseable predecessor baseline (no
    * predecessor, or one that predates the .macro layout — rippled < ~2.3).
@@ -63,15 +77,33 @@ const LE_RE =
 // TYPED_SFIELD(sfAccount, ACCOUNT, 1) / UNTYPED_SFIELD(sfLedgerEntry, LEDGERENTRY, 257)
 const SFIELD_RE = /^(?:UN)?TYPED_SFIELD\(\s*sf([A-Za-z0-9_]+)\s*,/
 
-export function parseAmendments(macro: string): string[] {
-  const out: string[] = []
+/**
+ * Split the amendments declared in features.macro by their Supported flag.
+ * `supported` = votable (Supported::Yes); `unsupported` = built but Supported::No
+ * (present in the binary, NOT votable). Names get the `fix` prefix for XRPL_FIX.
+ */
+function parseAmendmentsBySupport(macro: string): {
+  supported: string[]
+  unsupported: string[]
+} {
+  const supported: string[] = []
+  const unsupported: string[] = []
   for (const line of macro.split('\n')) {
     const m = line.match(FEATURE_RE)
     if (!m) continue
-    if (m[3].toLowerCase() !== 'yes') continue // skip Supported::No (built, not votable)
-    out.push(m[1].toUpperCase() === 'FIX' ? `fix${m[2]}` : m[2])
+    const name = m[1].toUpperCase() === 'FIX' ? `fix${m[2]}` : m[2]
+    if (m[3].toLowerCase() === 'yes') supported.push(name)
+    else unsupported.push(name) // Supported::No — built, not votable
   }
-  return out
+  return { supported, unsupported }
+}
+
+export function parseAmendments(macro: string): string[] {
+  return parseAmendmentsBySupport(macro).supported
+}
+
+export function parseUnsupportedAmendments(macro: string): string[] {
+  return parseAmendmentsBySupport(macro).unsupported
 }
 
 export function parseTransactionTypes(macro: string): string[] {
@@ -114,6 +146,7 @@ async function fetchSets(
     ledgerEntryTypes: parseLedgerEntryTypes(ledgerEntries),
     fields: parseFields(sfields),
     amendments: features ? parseAmendments(features) : [],
+    unsupportedAmendments: features ? parseUnsupportedAmendments(features) : [],
   }
 }
 
@@ -175,6 +208,14 @@ export async function buildReference(
         ),
       ]
 
+  // Baseline for "newly unvotable" is the predecessor's FULL amendment name set
+  // (votable + unvotable). An amendment that was already Supported::No before is
+  // a known in-progress feature, not a fresh "shipped but unvotable" surprise —
+  // only names absent from the predecessor entirely get flagged.
+  const prevAllAmendments = prev
+    ? [...prev.amendments, ...prev.unsupportedAmendments]
+    : []
+
   return {
     repo,
     tag,
@@ -184,6 +225,9 @@ export async function buildReference(
     addedAmendments: baselineMissing
       ? []
       : diff(full.amendments, prev?.amendments),
+    addedUnsupportedAmendments: baselineMissing
+      ? []
+      : diff(full.unsupportedAmendments, prevAllAmendments),
     baselineMissing,
   }
 }

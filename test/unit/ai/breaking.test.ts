@@ -63,7 +63,11 @@ const BASE_OPTS = {
   repo: 'rippled',
   apiKey: 'k',
 }
-const EMPTY_SURFACE: SurfaceDelta = { added: [], addedAmendments: [] }
+const EMPTY_SURFACE: SurfaceDelta = {
+  added: [],
+  addedAmendments: [],
+  addedUnsupportedAmendments: [],
+}
 const COMMIT = { sha: 'abc1234def', message: 'fix: change', author: 'alice' }
 const STPATHSET = file({
   filename: 'src/libxrpl/protocol/STPathSet.cpp',
@@ -119,6 +123,7 @@ describe('detectBreakingChanges', () => {
           { name: 'TakerPaysMPT', kind: 'field' },
         ],
         addedAmendments: ['featureMPTokensV2'],
+        addedUnsupportedAmendments: [],
       },
     })
     expect(result.hasBreakingNow).toBe(false)
@@ -140,7 +145,11 @@ describe('detectBreakingChanges', () => {
       ...BASE_OPTS,
       commits: [{ sha: 'a', message: 'Merge pull request #1', author: 'x' }],
       files: [],
-      surface: { added: fields, addedAmendments: [] },
+      surface: {
+        added: fields,
+        addedAmendments: [],
+        addedUnsupportedAmendments: [],
+      },
     })
     expect(result.newSurface).toContain('9 new fields')
     expect(mockCreate).not.toHaveBeenCalled() // trivial commits → no AI
@@ -151,9 +160,33 @@ describe('detectBreakingChanges', () => {
       ...BASE_OPTS,
       commits: [{ sha: 'a', message: 'bump version to 3.2.0-b6', author: 'x' }],
       files: [],
-      surface: { added: [], addedAmendments: ['featureMPTokensV2'] },
+      surface: {
+        added: [],
+        addedAmendments: ['featureMPTokensV2'],
+        addedUnsupportedAmendments: [],
+      },
     })
     expect(result.hasNewSurface).toBe(true)
+    expect(result.hasBreakingNow).toBe(false)
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  it('flags an added-but-unvotable amendment (Supported::No) as a distinct alert', async () => {
+    const result = await detectBreakingChanges({
+      ...BASE_OPTS,
+      commits: [{ sha: 'a', message: 'bump version to 3.2.0', author: 'x' }],
+      files: [],
+      surface: {
+        added: [],
+        addedAmendments: [],
+        addedUnsupportedAmendments: ['MPTokensV2'],
+      },
+    })
+    expect(result.hasUnvotableAmendment).toBe(true)
+    expect(result.unvotableAmendments).toContain('`MPTokensV2`')
+    expect(result.unvotableAmendments).toContain('Supported::No')
+    // It is NOT a votable-surface item and NOT a breaking-on-upgrade item.
+    expect(result.hasNewSurface).toBe(false)
     expect(result.hasBreakingNow).toBe(false)
     expect(mockCreate).not.toHaveBeenCalled()
   })

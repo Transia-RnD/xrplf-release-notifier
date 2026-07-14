@@ -1,11 +1,18 @@
-import Anthropic from '@anthropic-ai/sdk'
+import type Anthropic from '@anthropic-ai/sdk'
 import type { Logger } from 'winston'
 import type { CommitSummary, DiffFile } from '../github/client'
 import { fetchCompare, getFileAtRef } from '../github/client'
 import { findPreviousTag, findLastFinalTag } from '../version/predecessor'
 import { buildReference } from '../parity/reference'
 import type { Feature } from '../parity/reference'
-import { MODEL, MAX_COMMITS_FOR_SUMMARY, extractText } from './summarizer'
+import {
+  MODEL,
+  MAX_COMMITS_FOR_SUMMARY,
+  extractText,
+  TRIVIAL_COMMIT,
+} from './summarizer'
+import { createAnthropicClient } from './client'
+import { getErrorMessage } from '../utils/error'
 import { BREAKING_RULES } from './breaking-rules'
 
 const MAX_TOKENS = 1024
@@ -41,10 +48,7 @@ const PRIORITY_PATHS: RegExp[] = [
   /(\.cfg$|(^|\/)Config\.(h|cpp)$)/,
 ]
 
-const TRIVIAL_COMMIT =
-  /^(merge |bump version|version bump|set version|clang-format|format:)/i
-
-const STAGE1_PROMPT = `You are a rippled (XRP Ledger server) release engineer. From the commit subjects, changed-file list, and patches between two tags, list the DISTINCT changes that are CANDIDATES for BREAKING ON UPGRADE — unconditional behavior/wire/API/config changes a node would exhibit the moment it runs the new binary. Do NOT list new amendments, new transaction types, or new fields (those are handled separately). Just enumerate candidates a verifier should examine.
+const STAGE1_PROMPT = `You are a xrpld (XRP Ledger server) release engineer. From the commit subjects, changed-file list, and patches between two tags, list the DISTINCT changes that are CANDIDATES for BREAKING ON UPGRADE — unconditional behavior/wire/API/config changes a node would exhibit the moment it runs the new binary. Do NOT list new amendments, new transaction types, or new fields (those are handled separately). Just enumerate candidates a verifier should examine.
 
 ${BREAKING_RULES}
 
@@ -53,7 +57,7 @@ Output ONLY a JSON array (no prose, no markdown fences). Each element:
 
 Group trivially-related edits into one candidate. Omit pure refactor/test/CI/docs/logging/format changes and anything amendment-gated. If there are no candidates, output [].`
 
-const STAGE2_PROMPT = `You are a rippled (XRP Ledger server) release engineer verifying ONE candidate change. You are given the candidate, its diff hunk, and the governing source file at the new tag. Decide definitively whether it BREAKS on upgrade (unconditional — NO amendment gate, NO api_version gate) or is NOT breaking.
+const STAGE2_PROMPT = `You are a xrpld (XRP Ledger server) release engineer verifying ONE candidate change. You are given the candidate, its diff hunk, and the governing source file at the new tag. Decide definitively whether it BREAKS on upgrade (unconditional — NO amendment gate, NO api_version gate) or is NOT breaking.
 
 ${BREAKING_RULES}
 
@@ -67,21 +71,32 @@ export interface BreakingResult {
   breakingNow: string
   /** Composed markdown bullets ("" if none) — new protocol surface SDKs must add. */
   newSurface: string
+  /**
+   * Composed markdown bullets ("" if none) — amendments added this release but
+   * shipped Supported::No (built, NOT votable). Surfaced so the notification
+   * can't imply the feature is available when the network can't enable it.
+   */
+  unvotableAmendments: string
   hasBreakingNow: boolean
   hasNewSurface: boolean
+  hasUnvotableAmendment: boolean
 }
 
 const NO_BREAKING: BreakingResult = {
   breakingNow: '',
   newSurface: '',
+  unvotableAmendments: '',
   hasBreakingNow: false,
   hasNewSurface: false,
+  hasUnvotableAmendment: false,
 }
 
 /** New protocol surface (cumulative vs the last stable release), from buildReference. */
 export interface SurfaceDelta {
   added: Feature[]
   addedAmendments: string[]
+  /** Amendments new this release but Supported::No (built, not votable). */
+  addedUnsupportedAmendments: string[]
 }
 
 interface Candidate {
@@ -124,8 +139,13 @@ export interface DetectBreakingOptions {
 export async function detectBreakingChanges(
   opts: DetectBreakingOptions
 ): Promise<BreakingResult> {
-  const surface = opts.surface ?? { added: [], addedAmendments: [] }
+  const surface = opts.surface ?? {
+    added: [],
+    addedAmendments: [],
+    addedUnsupportedAmendments: [],
+  }
   const newSurface = formatSurface(surface)
+  const unvotableAmendments = formatUnvotableAmendments(surface)
 
   const commits = opts.commits
     .map((c) => ({ ...c, subject: c.message.split('\n')[0].trim() }))
@@ -151,8 +171,10 @@ export async function detectBreakingChanges(
   return {
     breakingNow,
     newSurface,
+    unvotableAmendments,
     hasBreakingNow: breakingNow.length > 0,
     hasNewSurface: newSurface.length > 0,
+    hasUnvotableAmendment: unvotableAmendments.length > 0,
   }
 }
 
@@ -161,7 +183,7 @@ async function detectBreakingNow(
   commits: { sha: string; subject: string; author: string }[],
   addedAmendments: string[]
 ): Promise<string> {
-  const client = new Anthropic({ apiKey: opts.apiKey })
+  const client = createAnthropicClient(opts.apiKey)
 
   const candidates = await listCandidates(
     client,
@@ -194,6 +216,28 @@ async function detectBreakingNow(
  * headline surface); the many new SFields are collapsed to a count + sample so
  * a feature-heavy release doesn't produce a 400-line post.
  */
+/**
+ * Compose the "added but NOT votable" alert — amendments new in this release that
+ * shipped Supported::No. The code is present (so the diff/notes look like the
+ * feature landed) but the network can't vote the amendment in, so it isn't
+ * actually available. This is the exact gap behind MPTokensV2 in 3.2.0: surface
+ * it loudly so the release announcement can't claim support it doesn't have.
+ */
+function formatUnvotableAmendments(surface: SurfaceDelta): string {
+  const amendments = dedupe(surface.addedUnsupportedAmendments)
+  if (!amendments.length) return ''
+
+  const lines = amendments
+    .slice(0, MAX_LISTED)
+    .map(
+      (a) =>
+        `• \`${a}\` — present in the binary but \`Supported::No\`, so the network cannot vote it in or enable it. Do NOT describe it as supported/available.`
+    )
+  if (amendments.length > MAX_LISTED)
+    lines.push(`• …and ${amendments.length - MAX_LISTED} more`)
+  return lines.join('\n')
+}
+
 function formatSurface(surface: SurfaceDelta): string {
   const amendments = dedupe(surface.addedAmendments)
   const txs = featureNames(surface.added, 'transactionType')
@@ -259,7 +303,7 @@ async function listCandidates(
     .join('\n')
 
   const user = [
-    `Diff between rippled ${opts.base} and ${opts.head}.`,
+    `Diff between xrpld ${opts.base} and ${opts.head}.`,
     `\nAmendments new in this release line (their gated code is NOT breaking-on-upgrade):\n${addedAmendments.length ? addedAmendments.map((a) => `- ${a}`).join('\n') : '(none)'}`,
     `\nCommits:\n${commitList}`,
     `\nChanged files:\n${fileList || '(none reported)'}`,
@@ -313,7 +357,7 @@ async function verifyCandidate(
   } catch (err: unknown) {
     opts.logger?.warn('Breaking stage-2 verify failed for candidate', {
       file: cand.file,
-      error: err instanceof Error ? err.message : String(err),
+      error: getErrorMessage(err),
     })
     return null
   }
@@ -337,7 +381,7 @@ async function loadGoverningSource(
     } catch (err: unknown) {
       opts.logger?.warn('Failed to fetch governing source', {
         file,
-        error: err instanceof Error ? err.message : String(err),
+        error: getErrorMessage(err),
       })
     }
     cache.set(file, text)
@@ -512,12 +556,16 @@ async function loadSurface(
       githubToken,
       logger,
     })
-    return { added: ref.added, addedAmendments: ref.addedAmendments }
+    return {
+      added: ref.added,
+      addedAmendments: ref.addedAmendments,
+      addedUnsupportedAmendments: ref.addedUnsupportedAmendments,
+    }
   } catch (err: unknown) {
     logger?.warn('New-surface build failed — omitting surface section', {
       tag,
-      error: err instanceof Error ? err.message : String(err),
+      error: getErrorMessage(err),
     })
-    return { added: [], addedAmendments: [] }
+    return { added: [], addedAmendments: [], addedUnsupportedAmendments: [] }
   }
 }

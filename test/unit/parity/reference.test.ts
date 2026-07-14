@@ -1,5 +1,6 @@
 import {
   parseAmendments,
+  parseUnsupportedAmendments,
   parseTransactionTypes,
   parseLedgerEntryTypes,
   parseFields,
@@ -56,6 +57,16 @@ XRPL_FEATURE(NotVotable,      Supported::no,  VoteBehavior::DefaultNo)
     expect(parseAmendments(lower)).toEqual(['fixCleanup3_1_3', 'AMM'])
   })
 
+  it('parseUnsupportedAmendments captures the Supported::No (built, not votable) names', () => {
+    // DynamicMPT is the lone Supported::No entry in the fixture.
+    expect(parseUnsupportedAmendments(FEATURES_MACRO)).toEqual(['DynamicMPT'])
+    const lower = `
+XRPL_FEATURE(AMM,        Supported::yes, VoteBehavior::DefaultNo)
+XRPL_FEATURE(NotVotable, Supported::no,  VoteBehavior::DefaultNo)
+`
+    expect(parseUnsupportedAmendments(lower)).toEqual(['NotVotable'])
+  })
+
   it('parses transaction-type human names', () => {
     expect(parseTransactionTypes(TRANSACTIONS_MACRO)).toEqual([
       'Payment',
@@ -88,11 +99,13 @@ describe('checklists exclude ledger types (parsed for context, not checked)', ()
     predecessorTag: '3.1.2',
     baselineMissing: false,
     addedAmendments: [],
+    addedUnsupportedAmendments: [],
     full: {
       transactionTypes: ['Payment', 'MPTokenIssuanceCreate'],
       ledgerEntryTypes: ['MPTokenIssuance', 'RippleState'],
       fields: ['DomainID'],
       amendments: [],
+      unsupportedAmendments: [],
     },
     added: [
       { name: 'MPTokenIssuanceCreate', kind: 'transactionType' },
@@ -159,7 +172,32 @@ describe('buildReference', () => {
     expect(names).not.toContain('Account:field')
     // fixCleanup3_2_0 is new; MPTokensV2 existed before
     expect(ref.addedAmendments).toEqual(['fixCleanup3_2_0'])
+    // DynamicMPT is new this release AND Supported::No — the gap signal.
+    expect(ref.addedUnsupportedAmendments).toEqual(['DynamicMPT'])
     expect(ref.baselineMissing).toBe(false)
+  })
+
+  it('does NOT re-flag an amendment that was already Supported::No in the predecessor', async () => {
+    // Predecessor already carries DynamicMPT as Supported::No — a known
+    // in-progress feature, not a fresh "shipped but unvotable" surprise.
+    const prevWithNo =
+      PREV_FEAT +
+      `XRPL_FEATURE(DynamicMPT, Supported::No, VoteBehavior::DefaultNo)\n`
+    jest
+      .spyOn(githubApi, 'getFileAtRef')
+      .mockImplementation((_repo, file, ref) => {
+        if (ref === '2.1.0' && file.endsWith('features.macro'))
+          return Promise.resolve(prevWithNo)
+        return Promise.resolve(mockMacros(ref, file))
+      })
+
+    const ref = await buildReference({
+      repo: 'XRPLF/rippled',
+      tag: '2.2.0',
+      predecessorTag: '2.1.0',
+    })
+
+    expect(ref.addedUnsupportedAmendments).toEqual([])
   })
 
   it('flags baselineMissing and empties the delta when the predecessor cannot be parsed', async () => {
@@ -180,5 +218,6 @@ describe('buildReference', () => {
     expect(ref.baselineMissing).toBe(true)
     expect(ref.added).toEqual([])
     expect(ref.addedAmendments).toEqual([])
+    expect(ref.addedUnsupportedAmendments).toEqual([])
   })
 })

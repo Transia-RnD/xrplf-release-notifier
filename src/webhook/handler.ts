@@ -22,6 +22,7 @@ import type { AppConfig } from '../config'
 import type { RepoConfig } from '../github/repos'
 import { findRepoByFullName, repoFullName } from '../github/repos'
 import { tagFloodGuard, formatTagFloodNotice } from './floodGuard'
+import { getErrorMessage } from '../utils/error'
 import {
   PushEventSchema,
   ReleaseEventSchema,
@@ -190,10 +191,15 @@ async function handleTagPush(
       `**:sparkles: New protocol surface — SDKs must add support:**\n${breaking.newSurface}`
     )
   }
+  if (breaking.unvotableAmendments) {
+    parts.push(
+      `**:warning: Added but NOT votable — don't claim support:**\n${breaking.unvotableAmendments}`
+    )
+  }
   const body = [...parts, summary.mattermost].join('\n\n')
   const level: TagBreakingLevel = breaking.hasBreakingNow
     ? 'breaking'
-    : breaking.hasNewSurface
+    : breaking.hasNewSurface || breaking.hasUnvotableAmendment
       ? 'surface'
       : 'none'
 
@@ -355,13 +361,15 @@ async function detectBreakingSafe(
     deps.logger.warn('Breaking-change detection failed — posting without it', {
       tag,
       repo: repoFullName(repo),
-      error: err instanceof Error ? err.message : String(err),
+      error: getErrorMessage(err),
     })
     return {
       breakingNow: '',
       newSurface: '',
+      unvotableAmendments: '',
       hasBreakingNow: false,
       hasNewSurface: false,
+      hasUnvotableAmendment: false,
     }
   }
 }
@@ -409,7 +417,7 @@ export async function sendNotifications(
     })
   } catch (err: unknown) {
     logger.error('Mattermost notification failed', {
-      error: err instanceof Error ? err.message : String(err),
+      error: getErrorMessage(err),
     })
   }
 }

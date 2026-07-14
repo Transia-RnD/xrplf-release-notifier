@@ -45,8 +45,10 @@ function primeSummarizerMocks(): void {
   ;(breaking.summarizeBreakingForTag as jest.Mock).mockResolvedValue({
     breakingNow: '',
     newSurface: '',
+    unvotableAmendments: '',
     hasBreakingNow: false,
     hasNewSurface: false,
+    hasUnvotableAmendment: false,
   })
 }
 
@@ -167,6 +169,32 @@ describe('handlePushEvent', () => {
     expect(level).toBe('surface')
     expect(body).toContain('New protocol surface')
     expect(body).toContain('`MPTokenIssuanceCreate`')
+    expect(body).not.toContain('Breaking on upgrade')
+  })
+
+  it('renders the "added but NOT votable" alert and escalates to "surface"', async () => {
+    ;(breaking.summarizeBreakingForTag as jest.Mock).mockResolvedValue({
+      breakingNow: '',
+      newSurface: '',
+      unvotableAmendments:
+        '• `MPTokensV2` — present in the binary but `Supported::No`, so the network cannot vote it in or enable it. Do NOT describe it as supported/available.',
+      hasBreakingNow: false,
+      hasNewSurface: false,
+      hasUnvotableAmendment: true,
+    })
+    const payload = withRepo({
+      ref: 'refs/tags/3.2.0',
+      head_commit: { id: 'abc123' },
+    })
+
+    await handlePushEvent(payload, deps)
+
+    const [, , body, , level] = (mattermost.formatMattermost as jest.Mock).mock
+      .calls[0]
+    expect(level).toBe('surface')
+    expect(body).toContain("Added but NOT votable — don't claim support")
+    expect(body).toContain('`MPTokensV2`')
+    expect(body).toContain('Supported::No')
     expect(body).not.toContain('Breaking on upgrade')
   })
 
