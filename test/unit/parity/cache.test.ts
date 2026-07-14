@@ -2,8 +2,47 @@ import {
   getCachedLocations,
   isCacheWarm,
   setCachedLocations,
+  loadLocationsCache,
+  saveLocationsCache,
 } from '../../../src/parity/cache'
 import type { LocationsCache } from '../../../src/parity/cache'
+import type { Storage } from '@google-cloud/storage'
+
+function storageWith(file: {
+  download?: () => Promise<[Buffer]>
+  save?: jest.Mock
+}): Storage {
+  return { bucket: () => ({ file: () => file }) } as unknown as Storage
+}
+
+describe('locations cache GCS load/save', () => {
+  it('loads the persisted cache', async () => {
+    const cache: LocationsCache = {
+      'XRPLF/x': {
+        sha: 's',
+        locations: { definitions: 'd', models: [], registries: [] },
+      },
+    }
+    const s = storageWith({
+      download: () => Promise.resolve([Buffer.from(JSON.stringify(cache))]),
+    })
+    await expect(loadLocationsCache(s)).resolves.toEqual(cache)
+  })
+
+  it('returns an empty cache when nothing is stored', async () => {
+    const s = storageWith({ download: () => Promise.reject(new Error('404')) })
+    await expect(loadLocationsCache(s)).resolves.toEqual({})
+  })
+
+  it('saves the cache as JSON', async () => {
+    const save = jest.fn().mockResolvedValue(undefined)
+    await saveLocationsCache(storageWith({ save }), {})
+    expect(save).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ contentType: 'application/json' })
+    )
+  })
+})
 
 describe('parity locations cache helpers', () => {
   const locations = {

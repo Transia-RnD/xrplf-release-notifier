@@ -93,17 +93,30 @@ describe('attachInProgressPRs', () => {
     expect(features[0].inProgressPR?.number).toBe(157)
   })
 
-  it('leaves supported features unannotated and tolerates a PR-list failure', async () => {
-    jest
+  it('tolerates a PR-list failure without throwing (gap stays unannotated)', async () => {
+    const spy = jest
       .spyOn(client, 'listPullRequests')
       .mockRejectedValue(new Error('rate limited'))
+    // A real gap (declared-only) so attachInProgressPRs actually calls listPRs.
+    const features = computeVerdicts(
+      [{ name: 'MPTokenIssuanceCreate', kind: 'transactionType' }],
+      inv(),
+      DEFS
+    )
+    await attachInProgressPRs('r', features, 't')
+    expect(spy).toHaveBeenCalled()
+    expect(features[0].inProgressPR).toBeUndefined()
+  })
+
+  it('skips the PR lookup entirely when every feature is supported', async () => {
+    const spy = jest.spyOn(client, 'listPullRequests')
     const features = computeVerdicts(
       [{ name: 'Payment', kind: 'transactionType' }],
       inv({ typedTransactionTypes: ['Payment'] }),
       DEFS
     )
     await attachInProgressPRs('r', features, 't')
-    expect(features[0].inProgressPR).toBeUndefined()
+    expect(spy).not.toHaveBeenCalled()
   })
 })
 
