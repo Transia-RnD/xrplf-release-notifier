@@ -37,4 +37,20 @@ jobs:
           workload_identity_provider: projects/417170642979/locations/global/workloadIdentityPools/github/providers/github-oidc
           service_account: github-deployer@xrplf-release-notifier.iam.gserviceaccount.com
       - uses: google-github-actions/setup-gcloud@v2
-      - run: gcloud builds submit --config cloudbuild.yaml --project xrplf-release-notifier .
+      # Submit async and poll: the deployer SA can't stream build logs (needs
+      # project Viewer), which makes a synchronous submit exit non-zero even
+      # when the build succeeds. Polling reports the build's real status.
+      - run: |
+          BUILD_ID=$(gcloud builds submit --config cloudbuild.yaml \
+            --project xrplf-release-notifier --async --format='value(id)' .)
+          echo "build: https://console.cloud.google.com/cloud-build/builds/$BUILD_ID?project=417170642979"
+          while true; do
+            STATUS=$(gcloud builds describe "$BUILD_ID" \
+              --project xrplf-release-notifier --format='value(status)')
+            echo "status: $STATUS"
+            case "$STATUS" in
+              SUCCESS) exit 0 ;;
+              FAILURE|INTERNAL_ERROR|TIMEOUT|CANCELLED|EXPIRED) exit 1 ;;
+            esac
+            sleep 20
+          done
