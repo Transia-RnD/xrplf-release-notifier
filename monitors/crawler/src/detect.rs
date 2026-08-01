@@ -246,36 +246,45 @@ impl DetectionEngine {
                         }));
                     }
 
-                    let unl_fork_sides = window
+                    // A genuine fork = NO branch reached quorum, so the network
+                    // can't finalize the ledger on any single hash. A lopsided
+                    // split — one branch has quorum and the rest are a handful of
+                    // out-of-sync stragglers (e.g. 32-vs-1) — is normal consensus
+                    // noise and finalizes fine, so it must NOT alert.
+                    let max_branch_unl = window
                         .hashes
                         .values()
-                        .filter(|vs| vs.iter().any(|v| self.unl_keys.contains(v)))
-                        .count();
+                        .map(|vs| vs.iter().filter(|v| self.unl_keys.contains(*v)).count())
+                        .max()
+                        .unwrap_or(0);
 
-                    let severity = if unl_fork_sides > 1 {
-                        "CRITICAL"
+                    let real_fork = if self.unl_keys.is_empty() {
+                        // No UNL to judge quorum: require a roughly balanced split
+                        // (minority branch ≥ 25% of validators).
+                        let total = window.all_validators.len();
+                        let max_total =
+                            window.hashes.values().map(|v| v.len()).max().unwrap_or(0);
+                        total.saturating_sub(max_total) * 4 >= total
                     } else {
-                        "WARNING"
+                        max_branch_unl < self.min_validators
                     };
 
-                    alerts.push(Alert {
-                        ts: chrono::Utc::now().to_rfc3339(),
-                        severity,
-                        category: "FORK_DETECTED",
-                        message: format!(
-                            "Ledger {} has {} hashes from {} validators{}",
-                            seq,
-                            window.hashes.len(),
-                            window.all_validators.len(),
-                            if unl_fork_sides > 1 {
-                                " — UNL SPLIT ACROSS BRANCHES"
-                            } else {
-                                ""
-                            }
-                        ),
-                        ledger_seq: Some(seq),
-                        details: serde_json::json!({ "branches": fork_details }),
-                    });
+                    if real_fork {
+                        alerts.push(Alert {
+                            ts: chrono::Utc::now().to_rfc3339(),
+                            severity: "CRITICAL",
+                            category: "FORK_DETECTED",
+                            message: format!(
+                                "Ledger {} forked — {} UNL validators split across {} hashes, no branch reached quorum ({})",
+                                seq,
+                                window.unl_validators.len(),
+                                window.hashes.len(),
+                                self.min_validators
+                            ),
+                            ledger_seq: Some(seq),
+                            details: serde_json::json!({ "branches": fork_details }),
+                        });
+                    }
                 }
 
                 // --- QUORUM CHECK ---
