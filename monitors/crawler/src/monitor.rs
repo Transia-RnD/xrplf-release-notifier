@@ -1,5 +1,6 @@
 use base64 as base64_engine;
 use crate::detect::{self, DetectionEngine, Alert};
+use crate::names;
 use crate::types::CrawlState;
 use crate::version::{self, Version};
 use crate::webhook::AlertSink;
@@ -196,6 +197,7 @@ pub async fn run(
     dry_run: bool,
     min_version: Option<String>,
     names_file: Option<String>,
+    names_url: Option<String>,
 ) -> Result<()> {
     let mut sink = AlertSink::new(webhook, dry_run, webhook_state, "xrpl-crawler/monitor");
     let suspicious = load_suspicious_pubkeys(state_file);
@@ -210,11 +212,11 @@ pub async fn run(
         None => HashSet::new(),
     };
     let mut engine = DetectionEngine::new(unl_keys, min_validators);
-    if let Some(nf) = names_file.as_deref() {
-        let names = detect::load_names(nf);
-        eprintln!("[{}] loaded {} validator names", ts(), names.len());
-        engine.set_names(names);
-    }
+    // Resolve validator names live from XRPLF/unl (fallback: shipped file), then
+    // refresh hourly so names stay current as the UNL changes.
+    let names = crate::names::resolve(names_url.as_deref(), names_file.as_deref()).await;
+    eprintln!("[{}] loaded {} validator names", ts(), names.len());
+    engine.set_names(names);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Validation>();
     let running = Arc::new(AtomicBool::new(true));
@@ -279,8 +281,23 @@ pub async fn run(
     eprintln!("[{}] logging validations to: {}", ts(), output);
     eprintln!("[{}] logging alerts to: {}", ts(), alert_output);
 
+    // Refresh the validator name map hourly (skip the immediate first tick).
+    let mut names_refresh = tokio::time::interval(Duration::from_secs(3600));
+    names_refresh.tick().await;
+
     loop {
         tokio::select! {
+            _ = names_refresh.tick() => {
+                if let Some(u) = names_url.as_deref() {
+                    match names::fetch(u).await {
+                        Ok(m) => {
+                            eprintln!("[{}] refreshed {} validator names", ts(), m.len());
+                            engine.set_names(m);
+                        }
+                        Err(e) => eprintln!("[{}] names refresh failed: {e}", ts()),
+                    }
+                }
+            }
             val = rx.recv() => {
                 let v = match val {
                     Some(v) => v,

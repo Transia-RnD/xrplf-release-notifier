@@ -2,6 +2,7 @@ mod amendments;
 mod crawl;
 mod detect;
 mod monitor;
+mod names;
 mod nunl;
 mod report;
 mod types;
@@ -111,6 +112,10 @@ enum Command {
         /// JSON map of validator key → name, so alerts say who a validator is
         #[arg(long)]
         names_file: Option<String>,
+
+        /// Live key→name source (XRPLF/unl raw yaml); refreshed hourly
+        #[arg(long, default_value = crate::names::DEFAULT_NAMES_URL)]
+        names_url: Option<String>,
     },
     /// Track network-wide amendment majority/activation via public ledger_entry
     Amendments {
@@ -159,6 +164,10 @@ enum Command {
         /// JSON map of validator key → name
         #[arg(long)]
         names_file: Option<String>,
+
+        /// Live key→name source (XRPLF/unl raw yaml)
+        #[arg(long, default_value = crate::names::DEFAULT_NAMES_URL)]
+        names_url: Option<String>,
     },
     /// Generate xrpld [ips_fixed] config from crawl results
     GenConfig {
@@ -215,6 +224,7 @@ async fn main() -> Result<()> {
             dry_run,
             min_version,
             names_file,
+            names_url,
         } => {
             monitor::run(
                 endpoints,
@@ -229,6 +239,7 @@ async fn main() -> Result<()> {
                 dry_run,
                 min_version,
                 names_file,
+                names_url,
             )
             .await
         }
@@ -246,7 +257,8 @@ async fn main() -> Result<()> {
             webhook_state,
             dry_run,
             names_file,
-        } => nunl::run(&endpoint, &state_file, webhook, webhook_state, dry_run, names_file).await,
+            names_url,
+        } => nunl::run(&endpoint, &state_file, webhook, webhook_state, dry_run, names_file, names_url).await,
         Command::GenConfig {
             state_file,
             max_peers,

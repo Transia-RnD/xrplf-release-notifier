@@ -193,14 +193,12 @@ pub async fn run(
     webhook_state: Option<String>,
     dry_run: bool,
     names_file: Option<String>,
+    names_url: Option<String>,
 ) -> anyhow::Result<()> {
     let fresh = fetch(endpoint).await?;
     let cold = !std::path::Path::new(state_file).exists();
     let prev: NunlState = cstate::load_state(state_file).unwrap_or_default();
-    let names = names_file
-        .as_deref()
-        .map(crate::detect::load_names)
-        .unwrap_or_default();
+    let names = crate::names::resolve(names_url.as_deref(), names_file.as_deref()).await;
 
     let alerts = diff(&prev, &fresh, cold, &names);
     if let Err(e) = cstate::save_state(state_file, &fresh) {
