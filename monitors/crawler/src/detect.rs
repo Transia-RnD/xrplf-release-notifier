@@ -354,12 +354,20 @@ impl DetectionEngine {
 
         let total_missing = silent.len() + never_seen.len();
 
-        if total_missing >= self.multi_silence_threshold {
-            let quorum_gap = self.unl_keys.len().saturating_sub(self.min_validators);
-            let severity = if total_missing > quorum_gap {
-                "CRITICAL"
+        // A handful of quiet validators is normal (restarts, relay gaps). Only
+        // surface when it actually threatens consensus: WARN within 1 of losing
+        // quorum, CRITICAL once quorum is gone. `multi_silence_threshold` is a
+        // floor so small/test UNLs still trip.
+        let quorum_gap = self.unl_keys.len().saturating_sub(self.min_validators);
+        let warn_at = quorum_gap.saturating_sub(1).max(self.multi_silence_threshold);
+
+        if total_missing >= warn_at {
+            let quorum_lost = total_missing > quorum_gap;
+            let severity = if quorum_lost { "CRITICAL" } else { "WARNING" };
+            let tail = if quorum_lost {
+                " — QUORUM LOST"
             } else {
-                "WARNING"
+                " — quorum margin low"
             };
 
             alerts.push(Alert {
@@ -367,19 +375,20 @@ impl DetectionEngine {
                 severity,
                 category: "VALIDATORS_SILENT",
                 message: format!(
-                    "{}/{} UNL validators missing ({} silent >{}s, {} never seen) — partition risk",
+                    "{}/{} UNL validators not validating ({} silent >{}s, {} never seen){}",
                     total_missing,
                     self.unl_keys.len(),
                     silent.len(),
                     self.silence_secs,
-                    never_seen.len()
+                    never_seen.len(),
+                    tail
                 ),
                 ledger_seq: None,
                 details: serde_json::json!({
                     "silent_validators": silent,
                     "never_seen_validators": never_seen,
                     "total_missing": total_missing,
-                    "can_still_reach_quorum": total_missing <= quorum_gap,
+                    "can_still_reach_quorum": !quorum_lost,
                 }),
             });
         }
