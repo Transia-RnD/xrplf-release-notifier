@@ -23,6 +23,7 @@ absolute security rules still fire.
 | `EXPIRY_HORIZON` | WARNING <14d / CRITICAL <7d | The current list is nearing its expiration | once per (publisher, seq, threshold) |
 | `NO_DATA` | WARNING | Connected to peers but no list gossip for 30 min (watcher wedged) | once per gap |
 | `PUBLISHER_MISSING` | WARNING | An allowlisted publisher unseen for >1h of observation | once per publisher until seen |
+| `UNL_DIVERGENCE` | WARNING | ≥2 fresh peers advertise different current sequences for a publisher for >10 min (relay split / stuck hub) | once per episode |
 
 ## crawler `monitor` — validations stream (always-on, observatory VM)
 
@@ -46,6 +47,11 @@ Suspicious-version detection is **off unless** `--suspicious-version` is set.
 | `SUSPICIOUS_VERSION` | WARNING / CRITICAL (≥10) | Nodes advertising the configured suspicious version are present | 24h |
 | `ECLIPSE_RISK` | CRITICAL (any high) / WARNING (≥3 medium) | Legitimate nodes have a majority of suspicious inbound peers | 24h |
 | `TOPOLOGY_COLLAPSE` | WARNING | Reachable node count fell below 60% of the previous crawl (partition/crawl failure) | 24h |
+| `NEW_VERSION` | INFO | A version absent last crawl now runs on ≥10 nodes (a release rolling out) | per version, 24h |
+
+Ad-hoc: `scripts/attack-report.py` turns a crawl `--report-json` into a
+manifest-flood **patch-adoption** post (patched ≥3.2.1 vs vulnerable). One-shot
+situational tool; fold into a recurring crawl alert if we want it standing.
 
 ## notifier watchdog — external vantage (Cloud Run, every 15 min) — planned
 

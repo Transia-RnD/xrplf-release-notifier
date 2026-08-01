@@ -27,6 +27,7 @@ import { renderReleaseCard } from './notifications/release-card'
 import { postToTwitter } from './notifications/twitter'
 import { runParityCheck } from './parity/runParityCheck'
 import { triggerParityCheck } from './parity/trigger'
+import { runWatchdog } from './monitors/watchdog'
 import { getErrorMessage } from './utils/error'
 
 // Cloud Logging keys log severity off a top-level `severity` field, NOT
@@ -118,6 +119,14 @@ async function start(): Promise<void> {
     '/parity',
     express.json(),
     asyncHandler((req, res) => handleParity(req, res, config, storage))
+  )
+
+  // External-vantage watchdog: is the observatory (vlwatch/crawler) alive and is
+  // the stage node reachable? Hit by Cloud Scheduler every ~15 min.
+  app.post(
+    '/monitors',
+    express.json(),
+    asyncHandler((req, res) => handleMonitors(req, res, config, storage))
   )
 
   app.get('/', (_req, res) => {
@@ -234,6 +243,45 @@ export async function handleParity(
   // dispatcher already returned to GitHub; here we can take as long as needed.
   await runParityCheck(versionInfo, { config, storage, logger })
   res.status(200).json({ action: 'parity_checked', version })
+}
+
+export async function handleMonitors(
+  req: Request,
+  res: Response,
+  config: AppConfig,
+  storage: Storage
+): Promise<void> {
+  // Same auth as /poll — Cloud Scheduler holds the shared token.
+  if (config.pollerToken) {
+    const provided = req.headers['x-cloud-scheduler-token']
+    if (provided !== config.pollerToken) {
+      logger.warn('Unauthorized /monitors request', {
+        ip: req.ip,
+        userAgent: req.headers['user-agent'],
+      })
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+  } else {
+    logger.warn(
+      '/monitors called without POLLER_TOKEN configured — endpoint is open'
+    )
+  }
+
+  const body = (req.body ?? {}) as { dryRun?: boolean }
+  const dryRun = body.dryRun === true
+
+  const { alerts, state } = await runWatchdog(
+    config.mattermostWebhookUrl,
+    storage,
+    { dryRun }
+  )
+  logger.info('Watchdog run complete', { alertCount: alerts.length, dryRun })
+  res.status(200).json({
+    action: alerts.length > 0 ? 'alerted' : 'ok',
+    alerts: alerts.map((a) => ({ category: a.category, severity: a.severity })),
+    ...(dryRun ? { dryRun: true, state } : {}),
+  })
 }
 
 export async function handlePoll(
