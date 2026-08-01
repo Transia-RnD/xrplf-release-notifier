@@ -13,10 +13,15 @@ mod vl;
 use alert::{DivergenceTracker, PeriodicFired, VlObservation, VlState};
 use monitor_common::{state as cstate, Notifier};
 use peer::{Event, Identity};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Cap on distinct (publisher, sequence) lists held in the in-memory `seen` map.
+/// Oldest entries are evicted FIFO past this so a hostile peer streaming lists
+/// under minted keys can't grow it (or the O(n) state rewrite) without limit.
+const MAX_TRACKED_LISTS: usize = 2048;
 
 const DEFAULT_PEERS: &[&str] = &[
     "r.ripple.com:51235",
@@ -28,9 +33,18 @@ const DEFAULT_PEERS: &[&str] = &[
 /// Well-known publisher master keys → labels. These seed the alert allowlist;
 /// `--publishers <file>` adds more (`HEXKEY=label` per line).
 const KNOWN_PUBLISHERS: &[(&str, &str)] = &[
-    ("ED2677ABFFD1B33AC6FBC3062B71F1E8397C1505E1C42C64D11AD1B28FF73F4734", "vl.ripple.com"),
-    ("ED42AEC58B701EEBB77356FFFEC26F83C1F0407263530F068C7C73D392C7E06FD1", "unl.xrplf.org"),
-    ("ED45D1840EE724BE327ABE9146503D5848EFD5F38B6D5FEDE71E80ACCE5E6E738B", "vl.xrplf.org"),
+    (
+        "ED2677ABFFD1B33AC6FBC3062B71F1E8397C1505E1C42C64D11AD1B28FF73F4734",
+        "vl.ripple.com",
+    ),
+    (
+        "ED42AEC58B701EEBB77356FFFEC26F83C1F0407263530F068C7C73D392C7E06FD1",
+        "unl.xrplf.org",
+    ),
+    (
+        "ED45D1840EE724BE327ABE9146503D5848EFD5F38B6D5FEDE71E80ACCE5E6E738B",
+        "vl.xrplf.org",
+    ),
 ];
 
 /// Well-known publisher master keys → labels.
@@ -70,28 +84,35 @@ fn load_allowlist(path: Option<&str>) -> HashMap<String, String> {
 fn fmt_time(unix: i64) -> String {
     let days = unix.div_euclid(86_400);
     let secs = unix.rem_euclid(86_400);
-    let z = days + 719_468;
+    let z = days.saturating_add(719_468);
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
+    let y = yoe.saturating_add(era.saturating_mul(400));
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", secs / 3600, (secs % 3600) / 60)
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02} UTC",
+        secs / 3600,
+        (secs % 3600) / 60
+    )
 }
 
 fn now_unix() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn fmt_expiry(unix: Option<i64>) -> String {
     match unix {
         None => "-".into(),
         Some(t) => {
-            let dd = (t - now_unix()) / 86_400;
+            let dd = t.saturating_sub(now_unix()) / 86_400;
             format!("{} ({}d)", fmt_time(t), dd)
         }
     }
@@ -121,17 +142,40 @@ fn main() {
         match a.as_str() {
             "--peers" => {
                 let v = it.next().expect("--peers needs a value");
-                peers = v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                peers = v
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
             }
             "--json" => json = true,
-            "--for" => run_for = Some(it.next().expect("--for needs seconds").parse().expect("bad --for")),
+            "--for" => {
+                run_for = Some(
+                    it.next()
+                        .expect("--for needs seconds")
+                        .parse()
+                        .expect("bad --for"),
+                )
+            }
             "--verbose" => verbose = true,
             "--webhook" => webhook = Some(it.next().expect("--webhook needs a url").clone()),
-            "--state-file" => state_file = Some(it.next().expect("--state-file needs a path").clone()),
-            "--publishers" => publishers_file = Some(it.next().expect("--publishers needs a path").clone()),
+            "--state-file" => {
+                state_file = Some(it.next().expect("--state-file needs a path").clone())
+            }
+            "--publishers" => {
+                publishers_file = Some(it.next().expect("--publishers needs a path").clone())
+            }
             "--dry-run" => dry_run = true,
-            "--inject" => inject_target = Some(it.next().expect("--inject needs host:port").clone()),
-            "--count" => inject_count = it.next().expect("--count needs a number").parse().expect("bad --count"),
+            "--inject" => {
+                inject_target = Some(it.next().expect("--inject needs host:port").clone())
+            }
+            "--count" => {
+                inject_count = it
+                    .next()
+                    .expect("--count needs a number")
+                    .parse()
+                    .expect("bad --count")
+            }
             "--help" | "-h" => {
                 println!("vlwatch [--peers h:p,...] [--json] [--for <seconds>] [--verbose]");
                 println!("        [--webhook <url>] [--state-file <path>] [--publishers <file>] [--dry-run]");
@@ -214,7 +258,9 @@ fn main() {
     let started = Instant::now();
     let deadline = run_for.map(|s| started + Duration::from_secs(s));
     // Latest list seen per (publisher, sequence); latest sequence per publisher.
+    // `seen_order` mirrors insertion order so the map can be bounded FIFO.
     let mut seen: HashMap<(String, u64), SeenList> = HashMap::new();
+    let mut seen_order: VecDeque<(String, u64)> = VecDeque::new();
 
     loop {
         if let Some(d) = deadline {
@@ -228,8 +274,12 @@ fn main() {
             if !active_peers.is_empty() {
                 last_peer_unix = now_unix();
             }
-            let alerts =
-                alert::evaluate_periodic(now_unix(), active_peers.len(), last_peer_unix, &mut periodic);
+            let alerts = alert::evaluate_periodic(
+                now_unix(),
+                active_peers.len(),
+                last_peer_unix,
+                &mut periodic,
+            );
             if let Err(e) = notifier.send(&alerts) {
                 eprintln!("vlwatch: notify failed: {e}");
             }
@@ -248,7 +298,10 @@ fn main() {
                 active_peers.insert(peer.clone());
                 last_peer_unix = now_unix();
                 if json {
-                    println!("{}", serde_json::json!({"event":"connected","peer":peer,"protocol":negotiated}));
+                    println!(
+                        "{}",
+                        serde_json::json!({"event":"connected","peer":peer,"protocol":negotiated})
+                    );
                 } else {
                     eprintln!("[{}] connected ({})", peer, negotiated);
                 }
@@ -256,7 +309,10 @@ fn main() {
             Event::Disconnected { peer, reason } => {
                 active_peers.remove(&peer);
                 if json {
-                    println!("{}", serde_json::json!({"event":"disconnected","peer":peer,"reason":reason}));
+                    println!(
+                        "{}",
+                        serde_json::json!({"event":"disconnected","peer":peer,"reason":reason})
+                    );
                 } else {
                     eprintln!("[{}] disconnected: {}", peer, reason);
                 }
@@ -264,7 +320,10 @@ fn main() {
             Event::Note { peer, msg } => {
                 if verbose {
                     if json {
-                        println!("{}", serde_json::json!({"event":"note","peer":peer,"note":msg}));
+                        println!(
+                            "{}",
+                            serde_json::json!({"event":"note","peer":peer,"note":msg})
+                        );
                     } else {
                         eprintln!("[{}] {}", peer, msg);
                     }
@@ -277,6 +336,14 @@ fn main() {
                         existing.peers.push(peer);
                     }
                     continue; // already reported this (publisher, sequence)
+                }
+                // Drop untrusted garbage: an unknown publisher whose manifest chain
+                // and blob signature both fail to verify. Don't track it, persist it,
+                // or alert on it — that path is a hostile peer's DoS lever. Known
+                // publishers and validly-chained lists still flow through below.
+                let known = allowlist.contains_key(&rec.publisher_hex);
+                if !known && !rec.sig_ok && !rec.chain_ok {
+                    continue;
                 }
                 let label = publisher_label(&rec.publisher_hex)
                     .map(String::from)
@@ -322,7 +389,11 @@ fn main() {
                         })
                     );
                 } else {
-                    let verified = if rec.sig_ok && rec.chain_ok { "OK" } else { "FAIL" };
+                    let verified = if rec.sig_ok && rec.chain_ok {
+                        "OK"
+                    } else {
+                        "FAIL"
+                    };
                     println!(
                         "LIST {label:<22} seq={} validators={} expires={} sig={verified} src={peer}",
                         rec.sequence,
@@ -330,7 +401,20 @@ fn main() {
                         fmt_expiry(rec.expiration_unix),
                     );
                 }
-                seen.insert(key, SeenList { rec, first_from: peer, peers: vec![] });
+                seen.insert(
+                    key.clone(),
+                    SeenList {
+                        rec,
+                        first_from: peer,
+                        peers: vec![],
+                    },
+                );
+                seen_order.push_back(key);
+                while seen_order.len() > MAX_TRACKED_LISTS {
+                    if let Some(old) = seen_order.pop_front() {
+                        seen.remove(&old);
+                    }
+                }
             }
         }
     }
@@ -361,8 +445,15 @@ fn main() {
                 label,
                 s.rec.sequence,
                 s.rec.validator_count,
-                s.rec.expiration_unix.map(fmt_time).unwrap_or_else(|| "-".into()),
-                if s.rec.sig_ok && s.rec.chain_ok { "OK" } else { "FAIL" },
+                s.rec
+                    .expiration_unix
+                    .map(fmt_time)
+                    .unwrap_or_else(|| "-".into()),
+                if s.rec.sig_ok && s.rec.chain_ok {
+                    "OK"
+                } else {
+                    "FAIL"
+                },
                 s.first_from,
             );
         }

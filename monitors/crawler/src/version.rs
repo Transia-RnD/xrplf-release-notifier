@@ -74,10 +74,7 @@ pub fn parse_min(s: &str) -> Option<(u8, u8, u8)> {
 
 /// Evaluate UNL upgrade adoption: how many observed validators run a build below
 /// `min`. Returns an alert when any lag (severity scales with the share).
-pub fn evaluate_adoption(
-    versions: &HashMap<String, Version>,
-    min: (u8, u8, u8),
-) -> Option<Alert> {
+pub fn evaluate_adoption(versions: &HashMap<String, Version>, min: (u8, u8, u8)) -> Option<Alert> {
     let total = versions.len();
     if total == 0 {
         return None;
@@ -88,7 +85,11 @@ pub fn evaluate_adoption(
         return None;
     }
     let pct = below * 100 / total;
-    let sev = if pct >= 34 { Severity::Critical } else { Severity::Warning };
+    let sev = if pct >= 34 {
+        Severity::Critical
+    } else {
+        Severity::Warning
+    };
     // Distinct lagging builds, for the alert body.
     let mut builds: Vec<String> = laggards.iter().map(|v| v.display()).collect();
     builds.sort();
@@ -132,9 +133,24 @@ mod tests {
 
     #[test]
     fn below_threshold_semantics() {
-        let final_320 = Version { major: 3, minor: 2, patch: 0, is_final: true };
-        let final_321 = Version { major: 3, minor: 2, patch: 1, is_final: true };
-        let rc_321 = Version { major: 3, minor: 2, patch: 1, is_final: false };
+        let final_320 = Version {
+            major: 3,
+            minor: 2,
+            patch: 0,
+            is_final: true,
+        };
+        let final_321 = Version {
+            major: 3,
+            minor: 2,
+            patch: 1,
+            is_final: true,
+        };
+        let rc_321 = Version {
+            major: 3,
+            minor: 2,
+            patch: 1,
+            is_final: false,
+        };
         assert!(final_320.below((3, 2, 1)));
         assert!(!final_321.below((3, 2, 1)));
         assert!(rc_321.below((3, 2, 1))); // rc of the hotfix counts as below final
@@ -143,13 +159,37 @@ mod tests {
     #[test]
     fn adoption_alert_scales() {
         let mut m = HashMap::new();
-        m.insert("a".into(), Version { major: 3, minor: 2, patch: 0, is_final: true });
-        m.insert("b".into(), Version { major: 3, minor: 2, patch: 1, is_final: true });
+        m.insert(
+            "a".into(),
+            Version {
+                major: 3,
+                minor: 2,
+                patch: 0,
+                is_final: true,
+            },
+        );
+        m.insert(
+            "b".into(),
+            Version {
+                major: 3,
+                minor: 2,
+                patch: 1,
+                is_final: true,
+            },
+        );
         // 1/2 below → 50% → CRITICAL
         let a = evaluate_adoption(&m, (3, 2, 1)).unwrap();
         assert_eq!(a.severity, Severity::Critical);
         // all patched → no alert
-        m.insert("a".into(), Version { major: 3, minor: 2, patch: 1, is_final: true });
+        m.insert(
+            "a".into(),
+            Version {
+                major: 3,
+                minor: 2,
+                patch: 1,
+                is_final: true,
+            },
+        );
         assert!(evaluate_adoption(&m, (3, 2, 1)).is_none());
     }
 }

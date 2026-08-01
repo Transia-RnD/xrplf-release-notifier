@@ -124,7 +124,10 @@ pub fn xrpl_verify(pubkey_33: &[u8], msg: &[u8], sig: &[u8]) -> bool {
         Some(0x02) | Some(0x03) if pubkey_33.len() == 33 => {
             use secp256k1::{ecdsa, Message, PublicKey, Secp256k1};
             let secp = Secp256k1::verification_only();
-            let (Ok(pk), Ok(sig)) = (PublicKey::from_slice(pubkey_33), ecdsa::Signature::from_der(sig)) else {
+            let (Ok(pk), Ok(sig)) = (
+                PublicKey::from_slice(pubkey_33),
+                ecdsa::Signature::from_der(sig),
+            ) else {
                 return false;
             };
             let msg = Message::from_digest(sha512_half(msg));

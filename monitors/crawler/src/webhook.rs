@@ -24,9 +24,17 @@ pub struct AlertSink {
 }
 
 impl AlertSink {
-    pub fn new(webhook: Option<String>, dry_run: bool, state_path: Option<String>, source: &str) -> Self {
+    pub fn new(
+        webhook: Option<String>,
+        dry_run: bool,
+        state_path: Option<String>,
+        source: &str,
+    ) -> Self {
         let enabled = webhook.is_some() || dry_run;
-        let dedup = state_path.as_ref().and_then(cstate::load_state).unwrap_or_default();
+        let dedup = state_path
+            .as_ref()
+            .and_then(cstate::load_state)
+            .unwrap_or_default();
         AlertSink {
             notifier: Notifier::new(
                 if dry_run { None } else { webhook },

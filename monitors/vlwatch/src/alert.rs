@@ -25,10 +25,36 @@ pub const NO_PEERS_SECS: i64 = 600;
 /// Peers must disagree on a publisher's sequence for this long → UNL_DIVERGENCE
 /// (normal relay lag is seconds; a sustained gap means a split or stuck hub).
 pub const DIVERGENCE_GRACE_SECS: i64 = 600;
-/// Only peers that reported within this window count toward divergence.
-pub const DIVERGENCE_PEER_FRESH_SECS: i64 = 300;
+/// Only peers that reported within this window count toward divergence. Must be
+/// at least the grace window: lists only gossip on connect/change, so a peer's
+/// report has to stay fresh across the whole grace period for the detector to fire.
+pub const DIVERGENCE_PEER_FRESH_SECS: i64 = 600;
 
 const MAX_NOTIFIED: usize = 64;
+
+/// Cap on distinct publishers held in persistent/in-memory tracking. Bounds the
+/// state file (rewritten whole on every observation) and the divergence maps so a
+/// hostile peer streaming lists under freshly-minted keys can't grow them without
+/// limit. Allowlisted publishers are never evicted.
+pub const MAX_PUBLISHERS: usize = 512;
+
+/// Evict the least-recently-seen non-allowlisted publisher when `incoming` would
+/// push `publishers` past [`MAX_PUBLISHERS`]. No-op if `incoming` already tracked
+/// or there is headroom.
+fn enforce_publisher_cap(state: &mut VlState, allowlist: &HashMap<String, String>, incoming: &str) {
+    if state.publishers.contains_key(incoming) || state.publishers.len() < MAX_PUBLISHERS {
+        return;
+    }
+    if let Some(victim) = state
+        .publishers
+        .iter()
+        .filter(|(k, _)| !allowlist.contains_key(*k))
+        .min_by_key(|(_, ps)| ps.last_seen_unix)
+        .map(|(k, _)| k.clone())
+    {
+        state.publishers.remove(&victim);
+    }
+}
 
 /// Persistent per-publisher dedup state, serialized to the state file.
 #[derive(Default, Serialize, Deserialize)]
@@ -46,6 +72,11 @@ pub struct PublisherState {
     pub expiration_unix: Option<i64>,
     pub unknown_alerted: bool,
     pub sig_fail_seqs: Vec<u64>,
+    /// Lowest sequence a SEQ_REGRESSION has fired for. Monotonic dedup that, unlike
+    /// the capped `notified_sequences` set, can't be evicted-and-replayed by a peer
+    /// cycling many old sequences.
+    #[serde(default)]
+    pub regression_low_water: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
@@ -88,6 +119,7 @@ pub fn evaluate(
     let key = obs.publisher_key.to_string();
     let known = allowlist.contains_key(&key);
 
+    enforce_publisher_cap(state, allowlist, &key);
     let ps = state.publishers.entry(key.clone()).or_default();
     if ps.label.is_empty() {
         ps.label = obs.label.to_string();
@@ -155,9 +187,11 @@ pub fn evaluate(
         push_capped(&mut ps.notified_sequences, obs.sequence);
         ps.max_sequence = obs.sequence;
     } else if obs.sequence < prior_max && seen_before && !cold_start {
-        // SEQ_REGRESSION — delta, suppressed on cold start. Dedup per (key, seq).
-        if !ps.notified_sequences.contains(&obs.sequence) {
-            push_capped(&mut ps.notified_sequences, obs.sequence);
+        // SEQ_REGRESSION — delta, suppressed on cold start. Dedup via a monotonic
+        // low-water mark: fire only for a sequence below any previously alerted, so
+        // a peer replaying old sequences can't evict the set and re-fire.
+        if ps.regression_low_water.is_none_or(|lw| obs.sequence < lw) {
+            ps.regression_low_water = Some(obs.sequence);
             alerts.push(
                 Alert::new(
                     Severity::Warning,
@@ -177,7 +211,7 @@ pub fn evaluate(
 
     // EXPIRY_HORIZON — absolute, once per (key, seq, threshold).
     if let Some(exp) = obs.expiration_unix {
-        let days_left = (exp - now_unix).div_euclid(86_400);
+        let days_left = exp.saturating_sub(now_unix).div_euclid(86_400);
         let threshold = if days_left < EXPIRY_CRIT_DAYS {
             Some((EXPIRY_CRIT_DAYS, Severity::Critical))
         } else if days_left < EXPIRY_WARN_DAYS {
@@ -266,6 +300,21 @@ pub struct DivergenceTracker {
 
 impl DivergenceTracker {
     pub fn observe(&mut self, publisher: &str, label: &str, peer: &str, seq: u64, now: i64) {
+        // Bound distinct publishers: evict the least-recently-active one so a peer
+        // gossiping lists under minted keys can't grow these maps without limit.
+        if !self.peers.contains_key(publisher) && self.peers.len() >= MAX_PUBLISHERS {
+            if let Some(victim) = self
+                .peers
+                .iter()
+                .min_by_key(|(_, by_peer)| by_peer.values().map(|(_, ts)| *ts).max().unwrap_or(0))
+                .map(|(k, _)| k.clone())
+            {
+                self.peers.remove(&victim);
+                self.labels.remove(&victim);
+                self.divergent_since.remove(&victim);
+                self.alerted.remove(&victim);
+            }
+        }
         self.labels.insert(publisher.to_string(), label.to_string());
         let by_peer = self.peers.entry(publisher.to_string()).or_default();
         let e = by_peer.entry(peer.to_string()).or_insert((0, 0));
@@ -277,7 +326,10 @@ impl DivergenceTracker {
     }
 
     fn label(&self, publisher: &str) -> String {
-        self.labels.get(publisher).cloned().unwrap_or_else(|| publisher.to_string())
+        self.labels
+            .get(publisher)
+            .cloned()
+            .unwrap_or_else(|| publisher.to_string())
     }
 
     /// Emit UNL_DIVERGENCE for publishers where ≥2 fresh peers have disagreed on
@@ -356,9 +408,18 @@ mod tests {
     fn cold_start_suppresses_new_list_but_not_absolute() {
         let mut st = VlState::default();
         // cold start: NEW_LIST suppressed, but expiry still fires.
-        let a = evaluate(&obs(10, true, true, Some(NOW + 5 * 86_400)), &mut st, &allow(), true, NOW);
+        let a = evaluate(
+            &obs(10, true, true, Some(NOW + 5 * 86_400)),
+            &mut st,
+            &allow(),
+            true,
+            NOW,
+        );
         let cats: Vec<_> = a.iter().map(|x| x.category.as_str()).collect();
-        assert!(!cats.contains(&"NEW_LIST"), "NEW_LIST must be suppressed cold");
+        assert!(
+            !cats.contains(&"NEW_LIST"),
+            "NEW_LIST must be suppressed cold"
+        );
         assert!(cats.contains(&"EXPIRY_HORIZON"));
         assert_eq!(st.publishers["KEYA"].max_sequence, 10);
     }
@@ -380,7 +441,9 @@ mod tests {
     fn sig_fail_is_absolute_and_deduped() {
         let mut st = VlState::default();
         let a = evaluate(&obs(10, false, true, None), &mut st, &allow(), true, NOW);
-        assert!(a.iter().any(|x| x.category == "SIG_FAIL" && x.severity == Severity::Critical));
+        assert!(a
+            .iter()
+            .any(|x| x.category == "SIG_FAIL" && x.severity == Severity::Critical));
         let a2 = evaluate(&obs(10, false, true, None), &mut st, &allow(), false, NOW);
         assert!(!a2.iter().any(|x| x.category == "SIG_FAIL"));
     }
@@ -401,14 +464,36 @@ mod tests {
     fn expiry_escalates_warn_then_crit_once_each() {
         let mut st = VlState::default();
         // 10 days left → WARNING
-        let a = evaluate(&obs(10, true, true, Some(NOW + 10 * 86_400)), &mut st, &allow(), true, NOW);
-        assert!(a.iter().any(|x| x.category == "EXPIRY_HORIZON" && x.severity == Severity::Warning));
+        let a = evaluate(
+            &obs(10, true, true, Some(NOW + 10 * 86_400)),
+            &mut st,
+            &allow(),
+            true,
+            NOW,
+        );
+        assert!(a
+            .iter()
+            .any(|x| x.category == "EXPIRY_HORIZON" && x.severity == Severity::Warning));
         // same seq, still 10d → no repeat
-        let a2 = evaluate(&obs(10, true, true, Some(NOW + 10 * 86_400)), &mut st, &allow(), false, NOW);
+        let a2 = evaluate(
+            &obs(10, true, true, Some(NOW + 10 * 86_400)),
+            &mut st,
+            &allow(),
+            false,
+            NOW,
+        );
         assert!(!a2.iter().any(|x| x.category == "EXPIRY_HORIZON"));
         // now 5 days left → CRITICAL (new threshold crossed)
-        let a3 = evaluate(&obs(10, true, true, Some(NOW + 5 * 86_400)), &mut st, &allow(), false, NOW);
-        assert!(a3.iter().any(|x| x.category == "EXPIRY_HORIZON" && x.severity == Severity::Critical));
+        let a3 = evaluate(
+            &obs(10, true, true, Some(NOW + 5 * 86_400)),
+            &mut st,
+            &allow(),
+            false,
+            NOW,
+        );
+        assert!(a3
+            .iter()
+            .any(|x| x.category == "EXPIRY_HORIZON" && x.severity == Severity::Critical));
     }
 
     #[test]
@@ -427,7 +512,7 @@ mod tests {
         t.observe("KEYA", "vl.example.org", "hubA", 100, t0);
         t.observe("KEYA", "vl.example.org", "hubB", 99, t0);
         assert!(t.evaluate(t0 + 60).is_empty()); // grace starts at t0+60
-        // still disagreeing past grace (peers refreshed so they stay fresh)
+                                                 // still disagreeing past grace (peers refreshed so they stay fresh)
         let fire_at = t0 + 60 + DIVERGENCE_GRACE_SECS;
         t.observe("KEYA", "vl.example.org", "hubA", 100, fire_at - 10);
         t.observe("KEYA", "vl.example.org", "hubB", 99, fire_at - 10);
@@ -438,6 +523,45 @@ mod tests {
         // recovery: laggard catches up → clears
         t.observe("KEYA", "vl.example.org", "hubB", 100, fire_at + 3);
         assert!(t.evaluate(fire_at + 4).is_empty());
+    }
+
+    #[test]
+    fn publisher_cap_bounds_state_and_keeps_allowlisted() {
+        let mut st = VlState::default();
+        let al = allow(); // KEYA is allowlisted, seeded oldest
+        evaluate(&obs(5, true, true, None), &mut st, &al, true, NOW);
+        // Flood distinct unknown publishers past the cap.
+        for i in 0..(MAX_PUBLISHERS + 50) {
+            let key = format!("ROGUE{i}");
+            let mut o = obs(1, true, true, None);
+            o.publisher_key = &key;
+            o.label = "rogue";
+            evaluate(&o, &mut st, &al, false, NOW + 1 + i as i64);
+        }
+        assert!(
+            st.publishers.len() <= MAX_PUBLISHERS,
+            "publisher map must stay bounded"
+        );
+        assert!(
+            st.publishers.contains_key("KEYA"),
+            "allowlisted publisher must never be evicted"
+        );
+    }
+
+    #[test]
+    fn seq_regression_dedups_across_set_eviction() {
+        let mut st = VlState::default();
+        evaluate(&obs(1000, true, true, None), &mut st, &allow(), true, NOW);
+        // First regression fires and sets the low-water mark.
+        let a = evaluate(&obs(999, true, true, None), &mut st, &allow(), false, NOW);
+        assert!(a.iter().any(|x| x.category == "SEQ_REGRESSION"));
+        // Cycle many higher-but-still-old sequences to churn notified_sequences past
+        // its cap, then replay 999 — the low-water mark must still suppress it.
+        for s in 900..1000u64 {
+            evaluate(&obs(s + 1, true, true, None), &mut st, &allow(), false, NOW);
+        }
+        let replay = evaluate(&obs(999, true, true, None), &mut st, &allow(), false, NOW);
+        assert!(!replay.iter().any(|x| x.category == "SEQ_REGRESSION"));
     }
 
     #[test]

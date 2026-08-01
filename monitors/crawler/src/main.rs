@@ -13,7 +13,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "xrpl-crawler", about = "Xahau network crawler and validation monitor")]
+#[command(
+    name = "xrpl-crawler",
+    about = "Xahau network crawler and validation monitor"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -34,6 +37,10 @@ enum Command {
         /// Max concurrent crawl requests
         #[arg(short, long, default_value_t = 20)]
         concurrency: usize,
+
+        /// Ceiling on total nodes to admit (bounds work against fabricated-IP flooding)
+        #[arg(long, default_value_t = 5000)]
+        max_nodes: usize,
 
         /// HTTP timeout per endpoint in seconds
         #[arg(short, long, default_value_t = 8)]
@@ -189,6 +196,7 @@ async fn main() -> Result<()> {
             seeds,
             suspicious_version,
             concurrency,
+            max_nodes,
             timeout,
             resume,
             output,
@@ -208,6 +216,7 @@ async fn main() -> Result<()> {
                 webhook,
                 webhook_state,
                 dry_run,
+                max_nodes,
             )
             .await
         }
@@ -258,7 +267,18 @@ async fn main() -> Result<()> {
             dry_run,
             names_file,
             names_url,
-        } => nunl::run(&endpoint, &state_file, webhook, webhook_state, dry_run, names_file, names_url).await,
+        } => {
+            nunl::run(
+                &endpoint,
+                &state_file,
+                webhook,
+                webhook_state,
+                dry_run,
+                names_file,
+                names_url,
+            )
+            .await
+        }
         Command::GenConfig {
             state_file,
             max_peers,

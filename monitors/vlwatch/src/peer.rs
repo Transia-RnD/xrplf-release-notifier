@@ -121,20 +121,38 @@ fn read_response(stream: &mut SslStream<TcpStream>) -> Result<HttpResponse, Stri
         .find(|(k, _)| k == "content-length")
         .and_then(|(_, v)| v.parse().ok())
         .unwrap_or(0);
+    // Clamp the attacker-declared body size (headers are already capped at 64KB).
+    if content_length > 4 * 1024 * 1024 {
+        return Err(format!(
+            "HTTP response body too large ({content_length} bytes)"
+        ));
+    }
     while rest.len() < content_length {
         let mut chunk = [0u8; 4096];
-        let n = stream.read(&mut chunk).map_err(|e| format!("read body: {e}"))?;
+        let n = stream
+            .read(&mut chunk)
+            .map_err(|e| format!("read body: {e}"))?;
         if n == 0 {
             break;
         }
         rest.extend_from_slice(&chunk[..n]);
     }
     let leftover = rest.split_off(content_length.min(rest.len()));
-    Ok(HttpResponse { status, reason, headers, body: rest, leftover })
+    Ok(HttpResponse {
+        status,
+        reason,
+        headers,
+        body: rest,
+        leftover,
+    })
 }
 
 enum Handshake {
-    Upgraded { stream: SslStream<TcpStream>, leftover: Vec<u8>, negotiated: String },
+    Upgraded {
+        stream: SslStream<TcpStream>,
+        leftover: Vec<u8>,
+        negotiated: String,
+    },
     Redirect(Vec<String>),
 }
 
@@ -144,7 +162,8 @@ fn connect_and_upgrade(host_port: &str, id: &Identity) -> Result<Handshake, Stri
         .map_err(|e| format!("resolve: {e}"))?
         .next()
         .ok_or("no address resolved")?;
-    let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(10)).map_err(|e| format!("connect: {e}"))?;
+    let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
+        .map_err(|e| format!("connect: {e}"))?;
     tcp.set_nodelay(true).ok();
     tcp.set_read_timeout(Some(Duration::from_secs(180))).ok();
     tcp.set_write_timeout(Some(Duration::from_secs(30))).ok();
@@ -181,7 +200,9 @@ fn connect_and_upgrade(host_port: &str, id: &Identity) -> Result<Handshake, Stri
          \r\n",
         id.public_b58
     );
-    stream.write_all(request.as_bytes()).map_err(|e| format!("write: {e}"))?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("write: {e}"))?;
 
     let resp = read_response(&mut stream)?;
     match resp.status {
@@ -192,13 +213,21 @@ fn connect_and_upgrade(host_port: &str, id: &Identity) -> Result<Handshake, Stri
                 .find(|(k, _)| k == "upgrade")
                 .map(|(_, v)| v.clone())
                 .unwrap_or_default();
-            Ok(Handshake::Upgraded { stream, leftover: resp.leftover, negotiated })
+            Ok(Handshake::Upgraded {
+                stream,
+                leftover: resp.leftover,
+                negotiated,
+            })
         }
         503 => {
             let ips = serde_json::from_slice::<serde_json::Value>(&resp.body)
                 .ok()
                 .and_then(|j| j.get("peer-ips").and_then(|v| v.as_array()).cloned())
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             Ok(Handshake::Redirect(ips))
         }
@@ -215,7 +244,10 @@ impl FrameReader {
     fn fill(&mut self, need: usize) -> Result<(), String> {
         while self.buf.len() < need {
             let mut chunk = [0u8; 65536];
-            let n = self.stream.read(&mut chunk).map_err(|e| format!("read: {e}"))?;
+            let n = self
+                .stream
+                .read(&mut chunk)
+                .map_err(|e| format!("read: {e}"))?;
             if n == 0 {
                 return Err("connection closed".into());
             }
@@ -233,7 +265,8 @@ impl FrameReader {
         if b0 & 0xFC != 0 {
             return Err(format!("invalid frame header byte {b0:#04x}"));
         }
-        let size = u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
+        let size =
+            u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
         if size > 64 * 1024 * 1024 {
             return Err(format!("frame exceeds 64MB ({size})"));
         }
@@ -259,13 +292,28 @@ fn handle_vl_message(msg_type: u16, payload: &[u8]) -> Result<Vec<VlRecord>, Str
             let version = proto::varint_field(&fs, 1).unwrap_or(2) as u32;
             let top_manifest = proto::bytes_field(&fs, 2).ok_or("collection missing manifest")?;
             let mut out = Vec::new();
+            // Bound work per collection: a single 64MB frame could pack millions of
+            // blob entries → a decode/event burst. Cap and drop the overflow.
+            const MAX_COLLECTION_ENTRIES: usize = 4096;
+            let mut dropped = 0usize;
             for f in fs.iter().filter(|f| f.num == 3) {
-                let proto::Value::Bytes(info) = &f.val else { continue };
+                if out.len() >= MAX_COLLECTION_ENTRIES {
+                    dropped += 1;
+                    continue;
+                }
+                let proto::Value::Bytes(info) = &f.val else {
+                    continue;
+                };
                 let bfs = proto::fields(info)?;
                 let manifest = proto::bytes_field(&bfs, 1).unwrap_or(top_manifest);
                 let blob = proto::bytes_field(&bfs, 2).ok_or("blob info missing blob")?;
                 let sig = proto::bytes_field(&bfs, 3).ok_or("blob info missing signature")?;
                 out.push(decode_vl(manifest, blob, sig, version)?);
+            }
+            if dropped > 0 {
+                eprintln!(
+                    "vlwatch: collection carried >{MAX_COLLECTION_ENTRIES} entries; dropped {dropped}"
+                );
             }
             Ok(out)
         }
@@ -282,7 +330,10 @@ fn session(host_port: &str, id: &Identity, tx: &Sender<Event>) -> String {
         let hs = match connect_and_upgrade(&target, id) {
             Ok(h) => h,
             Err(e) => {
-                let _ = tx.send(Event::Note { peer: target.clone(), msg: format!("connect failed: {e}") });
+                let _ = tx.send(Event::Note {
+                    peer: target.clone(),
+                    msg: format!("connect failed: {e}"),
+                });
                 continue;
             }
         };
@@ -298,13 +349,25 @@ fn session(host_port: &str, id: &Identity, tx: &Sender<Event>) -> String {
                     candidates.extend(ips.into_iter().take(5));
                 }
             }
-            Handshake::Upgraded { stream, leftover, negotiated } => {
-                let _ = tx.send(Event::Connected { peer: target.clone(), negotiated });
-                let mut reader = FrameReader { stream, buf: leftover };
+            Handshake::Upgraded {
+                stream,
+                leftover,
+                negotiated,
+            } => {
+                let _ = tx.send(Event::Connected {
+                    peer: target.clone(),
+                    negotiated,
+                });
+                let mut reader = FrameReader {
+                    stream,
+                    buf: leftover,
+                };
                 loop {
                     match reader.read_frame() {
                         Ok((proto::MT_PING, payload)) => {
-                            let Ok(fs) = proto::fields(&payload) else { continue };
+                            let Ok(fs) = proto::fields(&payload) else {
+                                continue;
+                            };
                             if proto::varint_field(&fs, 1) == Some(0) {
                                 let pong = proto::encode_pong(proto::varint_field(&fs, 2));
                                 let frame = proto::encode_frame(proto::MT_PING, &pong);
@@ -313,21 +376,25 @@ fn session(host_port: &str, id: &Identity, tx: &Sender<Event>) -> String {
                                 }
                             }
                         }
-                        Ok((t @ (proto::MT_VALIDATOR_LIST | proto::MT_VALIDATOR_LIST_COLLECTION), payload)) => {
-                            match handle_vl_message(t, &payload) {
-                                Ok(recs) => {
-                                    for rec in recs {
-                                        let _ = tx.send(Event::Vl { peer: target.clone(), rec });
-                                    }
-                                }
-                                Err(e) => {
-                                    let _ = tx.send(Event::Note {
+                        Ok((
+                            t @ (proto::MT_VALIDATOR_LIST | proto::MT_VALIDATOR_LIST_COLLECTION),
+                            payload,
+                        )) => match handle_vl_message(t, &payload) {
+                            Ok(recs) => {
+                                for rec in recs {
+                                    let _ = tx.send(Event::Vl {
                                         peer: target.clone(),
-                                        msg: format!("bad validator list message: {e}"),
+                                        rec,
                                     });
                                 }
                             }
-                        }
+                            Err(e) => {
+                                let _ = tx.send(Event::Note {
+                                    peer: target.clone(),
+                                    msg: format!("bad validator list message: {e}"),
+                                });
+                            }
+                        },
                         Ok(_) => {} // validations, proposals, endpoints, manifests, squelch… ignored
                         Err(e) => return e,
                     }
@@ -342,7 +409,10 @@ pub fn run_peer(host_port: String, id: std::sync::Arc<Identity>, tx: Sender<Even
     let mut backoff = 5;
     loop {
         let reason = session(&host_port, &id, &tx);
-        let _ = tx.send(Event::Disconnected { peer: host_port.clone(), reason });
+        let _ = tx.send(Event::Disconnected {
+            peer: host_port.clone(),
+            reason,
+        });
         std::thread::sleep(Duration::from_secs(backoff));
         backoff = (backoff * 2).min(60);
     }
@@ -353,7 +423,11 @@ pub fn run_peer(host_port: String, id: std::sync::Arc<Identity>, tx: Sender<Even
 /// gate the target through `inject::ensure_lab_target` first.
 pub fn inject_flood(host_port: &str, id: &Identity, count: usize) -> Result<(), String> {
     match connect_and_upgrade(host_port, id)? {
-        Handshake::Upgraded { mut stream, negotiated, .. } => {
+        Handshake::Upgraded {
+            mut stream,
+            negotiated,
+            ..
+        } => {
             let payload = crate::inject::build_manifests_message(count);
             let frame = proto::encode_frame(proto::MT_MANIFESTS, &payload);
             stream.write_all(&frame).map_err(|e| format!("send: {e}"))?;

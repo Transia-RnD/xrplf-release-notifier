@@ -5,6 +5,7 @@ import {
   evaluateObservatory,
   HEARTBEAT_MAX_AGE_MS,
   LOGS_MAX_AGE_MS,
+  NODE_UNREACHABLE_REPAGE_WINDOWS,
   NODE_UNREACHABLE_WINDOWS,
   type Heartbeat,
   type MonitorsState,
@@ -49,6 +50,35 @@ describe('evaluateObservatory', () => {
     const r = evaluateObservatory(hb, NOW, fresh())
     expect(r.alerts[0]?.text).toContain('crawler-monitor.service')
   })
+
+  it('malformed heartbeat (missing units) alerts OBSERVATORY_STALE instead of throwing', () => {
+    const malformed = { ts: new Date(NOW).toISOString() }
+    expect(() => evaluateObservatory(malformed, NOW, fresh())).not.toThrow()
+    const r = evaluateObservatory(malformed, NOW, fresh())
+    expect(r.alerts[0]?.category).toBe('OBSERVATORY_STALE')
+    expect(r.alerts[0]?.text).toContain('malformed')
+  })
+
+  it('malformed heartbeat (units not an object) alerts OBSERVATORY_STALE instead of throwing', () => {
+    const malformed = {
+      ts: new Date(NOW).toISOString(),
+      units: 'not-an-object',
+    }
+    expect(() => evaluateObservatory(malformed, NOW, fresh())).not.toThrow()
+    const r = evaluateObservatory(malformed, NOW, fresh())
+    expect(r.alerts[0]?.category).toBe('OBSERVATORY_STALE')
+  })
+
+  it('heartbeat with an unparseable timestamp is worded distinctly, not "NaN min old"', () => {
+    const hb = {
+      ts: 'not-a-real-timestamp',
+      units: { 'vlwatch.service': 'active' },
+    }
+    const r = evaluateObservatory(hb, NOW, fresh())
+    expect(r.alerts[0]?.category).toBe('OBSERVATORY_STALE')
+    expect(r.alerts[0]?.text).toContain('unparseable timestamp')
+    expect(r.alerts[0]?.text).not.toContain('NaN')
+  })
 })
 
 describe('evaluateNode', () => {
@@ -81,6 +111,42 @@ describe('evaluateNode', () => {
       fresh()
     )
     expect(ok.alerts.some((a) => a.category === 'BAD_SERVER_STATE')).toBe(false)
+  })
+
+  it('NODE_UNREACHABLE re-pages periodically during a sustained outage', () => {
+    let state = fresh()
+    for (let i = 0; i < NODE_UNREACHABLE_WINDOWS; i++) {
+      state = evaluateNode({ healthzOk: false, serverState: null }, state).state
+    }
+    // Walk forward until just before the next re-page window; none should fire.
+    for (let i = 1; i < NODE_UNREACHABLE_REPAGE_WINDOWS; i++) {
+      const r = evaluateNode({ healthzOk: false, serverState: null }, state)
+      expect(r.alerts).toHaveLength(0)
+      state = r.state
+    }
+    // The re-page window itself fires again.
+    const r = evaluateNode({ healthzOk: false, serverState: null }, state)
+    expect(r.alerts[0]?.category).toBe('NODE_UNREACHABLE')
+  })
+
+  it('resets nodeBadStateAlerted when the node goes fully unreachable, allowing bad-state to re-alert', () => {
+    const afterBadState = evaluateNode(
+      { healthzOk: true, serverState: 'connected' },
+      fresh()
+    ).state
+    expect(afterBadState.nodeBadStateAlerted).toBe(true)
+
+    const afterUnreachable = evaluateNode(
+      { healthzOk: false, serverState: null },
+      afterBadState
+    ).state
+    expect(afterUnreachable.nodeBadStateAlerted).toBe(false)
+
+    const r = evaluateNode(
+      { healthzOk: true, serverState: 'connected' },
+      afterUnreachable
+    )
+    expect(r.alerts.some((a) => a.category === 'BAD_SERVER_STATE')).toBe(true)
   })
 })
 

@@ -44,7 +44,8 @@ fn decode_blob_flex(raw: &[u8]) -> Result<(Vec<u8>, serde_json::Value), String> 
             }
         }
     }
-    let json = serde_json::from_slice(raw).map_err(|e| format!("blob is neither base64 nor JSON: {e}"))?;
+    let json =
+        serde_json::from_slice(raw).map_err(|e| format!("blob is neither base64 nor JSON: {e}"))?;
     Ok((raw.to_vec(), json))
 }
 
@@ -74,7 +75,7 @@ pub fn decode_vl(
         .iter()
         .any(|s| xrpl_verify(&m.signing_pub_key, &blob_bytes, s));
 
-    let ripple_to_unix = |v: &serde_json::Value| v.as_i64().map(|t| t + RIPPLE_EPOCH);
+    let ripple_to_unix = |v: &serde_json::Value| v.as_i64().map(|t| t.saturating_add(RIPPLE_EPOCH));
     Ok(VlRecord {
         publisher_hex: hex::encode_upper(&m.public_key),
         publisher_b58: encode_node_public(&m.public_key),

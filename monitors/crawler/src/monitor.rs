@@ -1,14 +1,14 @@
-use base64 as base64_engine;
-use crate::detect::{self, DetectionEngine, Alert};
+use crate::detect::{self, Alert, DetectionEngine};
 use crate::names;
 use crate::types::CrawlState;
 use crate::version::{self, Version};
 use crate::webhook::AlertSink;
-use std::collections::HashMap;
 use anyhow::{anyhow, Result};
+use base64 as base64_engine;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -75,7 +75,11 @@ fn base64_pubkey_to_base58(b64: &str) -> Option<String> {
         h2[..4].to_vec()
     };
     payload.extend_from_slice(&checksum);
-    Some(bs58::encode(&payload).with_alphabet(bs58::Alphabet::RIPPLE).into_string())
+    Some(
+        bs58::encode(&payload)
+            .with_alphabet(bs58::Alphabet::RIPPLE)
+            .into_string(),
+    )
 }
 
 fn load_suspicious_pubkeys(state_file: &str) -> HashSet<String> {
@@ -83,7 +87,11 @@ fn load_suspicious_pubkeys(state_file: &str) -> HashSet<String> {
     let data = match std::fs::read_to_string(state_file) {
         Ok(d) => d,
         Err(_) => {
-            eprintln!("[{}] no crawl state at {} — running without suspicious set", ts(), state_file);
+            eprintln!(
+                "[{}] no crawl state at {} — running without suspicious set",
+                ts(),
+                state_file
+            );
             return pks;
         }
     };
@@ -102,7 +110,11 @@ fn load_suspicious_pubkeys(state_file: &str) -> HashSet<String> {
             }
         }
     }
-    eprintln!("[{}] loaded {} suspicious pubkeys (base64 + base58)", ts(), pks.len());
+    eprintln!(
+        "[{}] loaded {} suspicious pubkeys (base64 + base58)",
+        ts(),
+        pks.len()
+    );
     pks
 }
 
@@ -115,9 +127,7 @@ async fn stream_validations(
     let (mut write, mut read) = ws.split();
 
     let subscribe = serde_json::json!({"command": "subscribe", "streams": ["validations"]});
-    write
-        .send(Message::Text(subscribe.to_string()))
-        .await?;
+    write.send(Message::Text(subscribe.to_string())).await?;
 
     eprintln!("[{}] [{}] connected, subscribed to validations", ts(), url);
 
@@ -169,9 +179,15 @@ fn emit_alert(alert: &Alert, alert_file: &mut std::fs::File, sink: &mut AlertSin
         "{}",
         serde_json::to_string(alert).unwrap_or_default()
     );
-    // Dedup key = category + ledger, so a persistent fork/stall posts at most
-    // once per 24h rather than on every affected ledger.
-    let key = alert.ledger_seq.map(|s| s.to_string()).unwrap_or_default();
+    // Dedup key = severity + ledger (webhook layer prepends category). Sustained
+    // conditions carry ledger_seq: None so their key is stable and they post at
+    // most once per 24h; including severity lets a WARNING→CRITICAL escalation
+    // (e.g. a growing MINI_FORK / worsening LOW_QUORUM) still break through.
+    let key = format!(
+        "{}:{}",
+        alert.severity,
+        alert.ledger_seq.map(|s| s.to_string()).unwrap_or_default()
+    );
     sink.send(
         AlertSink::severity_of(alert.severity),
         alert.category,
@@ -285,8 +301,22 @@ pub async fn run(
     let mut names_refresh = tokio::time::interval(Duration::from_secs(3600));
     names_refresh.tick().await;
 
+    // Wall-clock heartbeat driving the time-based detectors (chain-stall, silence,
+    // window finalization). Without this, a total outage — every WS endpoint
+    // disconnected so `rx.recv()` never fires — would keep the loop parked and the
+    // very alerts that outage should raise (CHAIN_STALL / VALIDATORS_SILENT) could
+    // never fire. Skip the immediate first tick.
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
+    heartbeat.tick().await;
+
     loop {
         tokio::select! {
+            _ = heartbeat.tick() => {
+                for alert in &engine.tick() {
+                    alert_count.fetch_add(1, Ordering::Relaxed);
+                    emit_alert(alert, &mut alert_file, &mut sink);
+                }
+            }
             _ = names_refresh.tick() => {
                 if let Some(u) = names_url.as_deref() {
                     match names::fetch(u).await {

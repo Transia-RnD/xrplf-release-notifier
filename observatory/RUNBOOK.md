@@ -73,15 +73,20 @@ watchdog's LOGS_STALE/LOG_ERRORS read it.
 
 ## Kill switch (stop posting NOW)
 
+Set `$HOST` to whatever you used at bring-up — the actual Proxmox box the
+monitors run on (`observatory@<host-ip>`), not necessarily a GCP VM:
+
 ```bash
-# Instant: halt all monitors — posting stops within a second (VM stays up).
-ssh -i ~/.ssh/xrpl-labs observatory@34.135.236.149 \
+# Instant: halt all monitors — posting stops within a second (host stays up).
+# Stops the live posters AND their timers, so no queued oneshot re-triggers them.
+ssh -i ~/.ssh/xrpl-labs "$HOST" \
   'sudo systemctl stop vlwatch crawler-monitor crawler-crawl.timer crawler-amendments.timer crawler-nunl.timer observatory-heartbeat.timer'
 
 # Back to silent instead of stopped (keeps observing, posts nothing):
-HOST=observatory@34.135.236.149 SILENT=1 ./deploy.sh
+HOST="$HOST" SILENT=1 ./deploy.sh
 
-# Nuclear: power off the VM.
+# GCP-only fallback — ONLY if the observatory was provisioned as a GCE VM via
+# observatory/terraform (not the default Proxmox host). Nuclear: powers off the VM.
 gcloud compute instances stop xrpl-observatory --zone=us-central1-a --project=xrplf-release-notifier
 ```
 

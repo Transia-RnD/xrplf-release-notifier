@@ -29,6 +29,14 @@ pub struct Report {
     pub leak_points: usize,
     pub eclipse_high: usize,
     pub eclipse_medium: usize,
+    // Crawl-completeness signals (set by the crawl driver, not `compute`), used to
+    // suppress a false TOPOLOGY_COLLAPSE when the crawl itself was partial.
+    #[serde(default)]
+    pub seeds: usize,
+    #[serde(default)]
+    pub endpoints_crawled: usize,
+    #[serde(default)]
+    pub crawl_errors: usize,
 }
 
 /// Distill a finished crawl into counts. `sus_version` empty ⇒ suspicion off.
@@ -51,7 +59,8 @@ pub fn compute(state: &CrawlState) -> Report {
         .collect();
 
     // Leak points: legitimate <-> suspicious edges (unique unordered pairs).
-    let mut leak_pairs: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut leak_pairs: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
     for e in &state.edges {
         let src_sus = sus_pks.contains(e.source.as_str());
         let peer_sus = sus_pks.contains(e.peer.as_str());
@@ -72,7 +81,11 @@ pub fn compute(state: &CrawlState) -> Report {
         if !node.crawlable || node.suspicious {
             continue;
         }
-        let edges: Vec<_> = state.edges.iter().filter(|e| e.source == node.pubkey).collect();
+        let edges: Vec<_> = state
+            .edges
+            .iter()
+            .filter(|e| e.source == node.pubkey)
+            .collect();
         if edges.is_empty() {
             continue;
         }
@@ -96,7 +109,11 @@ pub fn compute(state: &CrawlState) -> Report {
         if in_s == 0 && out_s == 0 {
             continue;
         }
-        let in_pct = if in_t > 0 { (in_s as f64 / in_t as f64) * 100.0 } else { 0.0 };
+        let in_pct = if in_t > 0 {
+            (in_s as f64 / in_t as f64) * 100.0
+        } else {
+            0.0
+        };
         if in_pct >= 50.0 {
             eclipse_high += 1;
         } else if in_pct >= 25.0 || in_s + out_s >= 3 {
@@ -111,6 +128,8 @@ pub fn compute(state: &CrawlState) -> Report {
         leak_points: leak_pairs.len(),
         eclipse_high,
         eclipse_medium,
+        // Filled in by the crawl driver (it has the crawl attempt/error counts).
+        ..Default::default()
     }
 }
 
@@ -137,8 +156,13 @@ pub fn evaluate(report: &Report, prev: Option<&Report>) -> Vec<RuleAlert> {
             severity: sev,
             category: "SUSPICIOUS_VERSION",
             key: "count".into(),
-            title: format!("{} suspicious-version nodes on the network", report.suspicious),
-            text: "Nodes advertising the configured suspicious version were found during the crawl.".into(),
+            title: format!(
+                "{} suspicious-version nodes on the network",
+                report.suspicious
+            ),
+            text:
+                "Nodes advertising the configured suspicious version were found during the crawl."
+                    .into(),
             fields: vec![
                 ("suspicious".into(), report.suspicious.to_string()),
                 ("total_nodes".into(), report.nodes.to_string()),
@@ -183,7 +207,9 @@ pub fn evaluate(report: &Report, prev: Option<&Report>) -> Vec<RuleAlert> {
                     category: "NEW_VERSION",
                     key: ver.clone(),
                     title: format!("New node version on the network: {ver}"),
-                    text: format!("{count} nodes are now running {ver} (not seen in the previous crawl)."),
+                    text: format!(
+                        "{count} nodes are now running {ver} (not seen in the previous crawl)."
+                    ),
                     fields: vec![
                         ("version".into(), ver.clone()),
                         ("nodes".into(), count.to_string()),
@@ -193,7 +219,17 @@ pub fn evaluate(report: &Report, prev: Option<&Report>) -> Vec<RuleAlert> {
             }
         }
 
-        if prev.nodes >= COLLAPSE_FLOOR && report.nodes * 100 < prev.nodes * COLLAPSE_RATIO_PCT {
+        // Completeness guard: a crawl that mostly errored, or started from
+        // materially fewer seeds than the baseline, sees fewer nodes for reasons
+        // that have nothing to do with the real topology — don't cry collapse.
+        let attempts = report.endpoints_crawled + report.crawl_errors;
+        let high_error_rate = attempts > 0 && report.crawl_errors * 100 > attempts * 40;
+        let seeds_shrank = prev.seeds > 0 && report.seeds * 2 < prev.seeds;
+        if prev.nodes >= COLLAPSE_FLOOR
+            && report.nodes * 100 < prev.nodes * COLLAPSE_RATIO_PCT
+            && !high_error_rate
+            && !seeds_shrank
+        {
             out.push(RuleAlert {
                 severity: Severity::Warning,
                 category: "TOPOLOGY_COLLAPSE",
@@ -241,7 +277,9 @@ mod tests {
     #[test]
     fn eclipse_high_is_critical() {
         let a = evaluate(&rpt(900, 0, 1, 0), None);
-        assert!(a.iter().any(|x| x.category == "ECLIPSE_RISK" && x.severity == Severity::Critical));
+        assert!(a
+            .iter()
+            .any(|x| x.category == "ECLIPSE_RISK" && x.severity == Severity::Critical));
     }
 
     #[test]
@@ -255,10 +293,16 @@ mod tests {
         let mut prev = rpt(900, 0, 0, 0);
         prev.versions = HashMap::from([("xrpld-3.2.0".into(), 840)]);
         let a = evaluate(&now, Some(&prev));
-        let new_versions: Vec<_> = a.iter().filter(|x| x.category == "NEW_VERSION").map(|x| x.key.as_str()).collect();
+        let new_versions: Vec<_> = a
+            .iter()
+            .filter(|x| x.category == "NEW_VERSION")
+            .map(|x| x.key.as_str())
+            .collect();
         assert_eq!(new_versions, vec!["xrpld-3.3.0"]);
         // no prev → no NEW_VERSION (cold)
-        assert!(!evaluate(&now, None).iter().any(|x| x.category == "NEW_VERSION"));
+        assert!(!evaluate(&now, None)
+            .iter()
+            .any(|x| x.category == "NEW_VERSION"));
     }
 
     #[test]

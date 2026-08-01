@@ -15,6 +15,11 @@ ExecStart=/opt/observatory/bin/vlwatch \
 Restart=always
 RestartSec=10
 StateDirectory=observatory
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/observatory
 
 [Install]
 WantedBy=multi-user.target

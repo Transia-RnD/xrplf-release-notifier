@@ -55,7 +55,8 @@ mod tests {
     #[test]
     fn encodes_known_master_key() {
         // squidrouter.com's master key, cross-checked against xrpscan.
-        let key = hex::decode("ED7B1A5F8FDAA19A2CA33B5BB8FED39B442F4F2F45BB331C525B09F92D8486B824").unwrap();
+        let key = hex::decode("ED7B1A5F8FDAA19A2CA33B5BB8FED39B442F4F2F45BB331C525B09F92D8486B824")
+            .unwrap();
         assert_eq!(
             encode_node_public(&key),
             "nHUHeq3QdVyLTUENPHAAJ1d5M1SbvY49rajs31mJS8CEfrvTfjn3"

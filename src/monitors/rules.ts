@@ -4,6 +4,8 @@
  * inputs so they unit-test without network or GCS. Fetching lives in watchdog.ts.
  */
 
+import { z } from 'zod'
+
 export type Severity = 'INFO' | 'WARNING' | 'CRITICAL'
 
 export interface WatchdogAlert {
@@ -34,17 +36,21 @@ export const HEARTBEAT_MAX_AGE_MS = 30 * 60 * 1000
 export const LOGS_MAX_AGE_MS = 3 * 60 * 60 * 1000
 /** NODE_UNREACHABLE needs this many consecutive failed windows. */
 export const NODE_UNREACHABLE_WINDOWS = 2
+/** Once unreachable, re-page every this many additional windows (sustained outage). */
+export const NODE_UNREACHABLE_REPAGE_WINDOWS = 8
 const HEALTHY_STATES = new Set(['full', 'proposing', 'validating'])
 
-export interface Heartbeat {
-  ts: string
-  host?: string
-  units: Record<string, string>
-}
+/** Runtime shape of the fetched heartbeat JSON — the source is an external file, never trust it. */
+export const HeartbeatSchema = z.object({
+  ts: z.string(),
+  host: z.string().optional(),
+  units: z.record(z.string(), z.string()),
+})
+export type Heartbeat = z.infer<typeof HeartbeatSchema>
 
-/** OBSERVATORY_STALE — heartbeat missing, stale, or a monitor unit not active. */
+/** OBSERVATORY_STALE — heartbeat missing, malformed, stale, or a monitor unit not active. */
 export function evaluateObservatory(
-  heartbeat: Heartbeat | null,
+  heartbeatInput: unknown,
   nowMs: number,
   state: MonitorsState
 ): { alerts: WatchdogAlert[]; state: MonitorsState } {
@@ -52,17 +58,25 @@ export function evaluateObservatory(
   const alerts: WatchdogAlert[] = []
 
   let problem: string | null = null
-  if (!heartbeat) {
+  if (heartbeatInput === null || heartbeatInput === undefined) {
     problem = 'No observatory heartbeat object found.'
   } else {
-    const ageMs = nowMs - Date.parse(heartbeat.ts)
-    const downUnits = Object.entries(heartbeat.units)
-      .filter(([, s]) => s !== 'active')
-      .map(([u]) => u)
-    if (Number.isNaN(ageMs) || ageMs > HEARTBEAT_MAX_AGE_MS) {
-      problem = `Observatory heartbeat is stale (${Math.round(ageMs / 60000)} min old).`
-    } else if (downUnits.length > 0) {
-      problem = `Observatory units not active: ${downUnits.join(', ')}.`
+    const parsed = HeartbeatSchema.safeParse(heartbeatInput)
+    if (!parsed.success) {
+      problem = 'Observatory heartbeat is malformed (unexpected shape).'
+    } else {
+      const heartbeat = parsed.data
+      const ageMs = nowMs - Date.parse(heartbeat.ts)
+      const downUnits = Object.entries(heartbeat.units)
+        .filter(([, s]) => s !== 'active')
+        .map(([u]) => u)
+      if (Number.isNaN(ageMs)) {
+        problem = 'Observatory heartbeat has an unparseable timestamp.'
+      } else if (ageMs > HEARTBEAT_MAX_AGE_MS) {
+        problem = `Observatory heartbeat is stale (${Math.round(ageMs / 60000)} min old).`
+      } else if (downUnits.length > 0) {
+        problem = `Observatory units not active: ${downUnits.join(', ')}.`
+      }
     }
   }
 
@@ -88,7 +102,8 @@ export interface NodeProbe {
 }
 
 /**
- * NODE_UNREACHABLE (streak-gated) + BAD_SERVER_STATE. The stage node's own
+ * NODE_UNREACHABLE (streak-gated, re-paging every NODE_UNREACHABLE_REPAGE_WINDOWS
+ * while the outage persists) + BAD_SERVER_STATE. The stage node's own
  * unl-monitor.sh covers node health from the inside; this only catches the case
  * where that monitor is itself unreachable, and a bad public server_state.
  */
@@ -102,15 +117,25 @@ export function evaluateNode(
   const reachable = probe.healthzOk || probe.serverState !== null
   if (!reachable) {
     next.nodeUnreachableStreak += 1
-    // Fire once, when the streak first reaches the threshold.
-    if (next.nodeUnreachableStreak === NODE_UNREACHABLE_WINDOWS) {
+    const streak = next.nodeUnreachableStreak
+    const windowsPastThreshold = streak - NODE_UNREACHABLE_WINDOWS
+    // Fire when the streak first reaches the threshold, then re-page
+    // periodically for as long as the outage continues.
+    if (
+      streak === NODE_UNREACHABLE_WINDOWS ||
+      (windowsPastThreshold > 0 &&
+        windowsPastThreshold % NODE_UNREACHABLE_REPAGE_WINDOWS === 0)
+    ) {
       alerts.push({
         severity: 'CRITICAL',
         category: 'NODE_UNREACHABLE',
         title: 'UNL stage node unreachable',
-        text: `healthz and public WS both failed for ${NODE_UNREACHABLE_WINDOWS} consecutive checks — the node or its on-box monitor may be down.`,
+        text: `healthz and public WS both failed for ${streak} consecutive checks — the node or its on-box monitor may be down.`,
       })
     }
+    // Fully unreachable means the WS can't have reported a server_state either
+    // — clear the dedup flag so bad-state → unreachable → bad-state re-alerts.
+    next.nodeBadStateAlerted = false
   } else {
     next.nodeUnreachableStreak = 0
   }

@@ -31,11 +31,7 @@ fn load_state(path: &str) -> Result<CrawlState> {
     Ok(serde_json::from_str(&data)?)
 }
 
-async fn crawl_endpoint(
-    client: &reqwest::Client,
-    ip: &str,
-    port: u16,
-) -> Result<CrawlResponse> {
+async fn crawl_endpoint(client: &reqwest::Client, ip: &str, port: u16) -> Result<CrawlResponse> {
     let host = if ip.contains(':') {
         format!("[{}]", ip)
     } else {
@@ -52,10 +48,33 @@ async fn crawl_endpoint(
     Ok(resp)
 }
 
-fn merge(state: &mut CrawlState, peers: &[CrawlPeer], source_pk: Option<&str>, sus_version: &str) {
+fn merge(
+    state: &mut CrawlState,
+    peers: &[CrawlPeer],
+    source_pk: Option<&str>,
+    sus_version: &str,
+    max_nodes: usize,
+    cap_logged: &mut bool,
+) {
     for peer in peers {
         let pk = &peer.public_key;
         let is_sus = !sus_version.is_empty() && peer.version.as_deref() == Some(sus_version);
+
+        // Bound total work: a hostile cluster advertising fabricated unique IPs
+        // could otherwise inflate the node/queue maps without limit (concurrency
+        // caps parallelism, not total work). Past the ceiling, stop admitting new
+        // nodes — known nodes still update.
+        if !state.nodes.contains_key(pk) && state.nodes.len() >= max_nodes {
+            if !*cap_logged {
+                *cap_logged = true;
+                eprintln!(
+                    "[{}] crawl node ceiling reached ({}) — no longer enqueuing new nodes/endpoints",
+                    ts(),
+                    max_nodes
+                );
+            }
+            continue;
+        }
 
         let node = state.nodes.entry(pk.clone()).or_insert_with(|| NodeInfo {
             pubkey: pk.clone(),
@@ -74,7 +93,7 @@ fn merge(state: &mut CrawlState, peers: &[CrawlPeer], source_pk: Option<&str>, s
             let ep = format!("{}:{}", ip, port);
             node.ips.insert(ep.clone());
             state.ep_to_pubkey.insert(ep.clone(), pk.clone());
-            if !state.visited.contains(&ep) {
+            if !state.visited.contains(&ep) && state.queue.len() < max_nodes {
                 state.queue.push(ep);
             }
         }
@@ -103,7 +122,9 @@ pub async fn run(
     webhook: Option<String>,
     webhook_state: Option<String>,
     dry_run: bool,
+    max_nodes: usize,
 ) -> Result<()> {
+    let mut cap_logged = false;
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(Duration::from_secs(timeout_secs))
@@ -189,8 +210,19 @@ pub async fn run(
                             node.crawlable = true;
                         }
                     }
-                    let peers = response.overlay.as_ref().map(|o| o.active.as_slice()).unwrap_or(&[]);
-                    merge(&mut state, peers, source_pk.as_deref(), sus_version);
+                    let peers = response
+                        .overlay
+                        .as_ref()
+                        .map(|o| o.active.as_slice())
+                        .unwrap_or(&[]);
+                    merge(
+                        &mut state,
+                        peers,
+                        source_pk.as_deref(),
+                        sus_version,
+                        max_nodes,
+                        &mut cap_logged,
+                    );
                 }
                 Err(e) => {
                     errors += 1;
@@ -219,7 +251,11 @@ pub async fn run(
     // Machine-readable report + snapshot alert rules.
     if let Some(path) = report_json {
         let prev: Option<report::Report> = monitor_common::state::load_state(path);
-        let fresh = report::compute(&state);
+        let mut fresh = report::compute(&state);
+        // Completeness signals for the TOPOLOGY_COLLAPSE guard (N12).
+        fresh.seeds = seeds.len();
+        fresh.endpoints_crawled = crawled;
+        fresh.crawl_errors = errors;
         let alerts = report::evaluate(&fresh, prev.as_ref());
         if let Err(e) = monitor_common::state::save_state(path, &fresh) {
             eprintln!("crawler: report-json save failed: {e}");
@@ -228,7 +264,15 @@ pub async fn run(
         if sink.enabled() {
             let now = chrono::Utc::now().timestamp();
             for a in &alerts {
-                sink.send(a.severity, a.category, &a.key, &a.title, &a.text, a.fields.clone(), now);
+                sink.send(
+                    a.severity,
+                    a.category,
+                    &a.key,
+                    &a.title,
+                    &a.text,
+                    a.fields.clone(),
+                    now,
+                );
             }
             eprintln!("crawler: {} snapshot alert(s) evaluated", alerts.len());
         }
@@ -239,7 +283,10 @@ pub async fn run(
 fn print_report(state: &CrawlState, sus_version: &str) {
     let nodes: Vec<&NodeInfo> = state.nodes.values().collect();
     let suspicious: Vec<&&NodeInfo> = nodes.iter().filter(|n| n.suspicious).collect();
-    let legitimate: Vec<&&NodeInfo> = nodes.iter().filter(|n| !n.suspicious && n.version.is_some()).collect();
+    let legitimate: Vec<&&NodeInfo> = nodes
+        .iter()
+        .filter(|n| !n.suspicious && n.version.is_some())
+        .collect();
     let sus_pks: HashSet<&str> = suspicious.iter().map(|n| n.pubkey.as_str()).collect();
 
     eprintln!("{}", "=".repeat(80));
@@ -254,14 +301,20 @@ fn print_report(state: &CrawlState, sus_version: &str) {
 
     let mut versions: HashMap<&str, usize> = HashMap::new();
     for n in &nodes {
-        *versions.entry(n.version.as_deref().unwrap_or("unknown")).or_default() += 1;
+        *versions
+            .entry(n.version.as_deref().unwrap_or("unknown"))
+            .or_default() += 1;
     }
     let mut version_list: Vec<_> = versions.into_iter().collect();
     version_list.sort_by(|a, b| b.1.cmp(&a.1));
 
     eprintln!("\n  versions:");
     for (v, count) in &version_list {
-        let marker = if *v == sus_version { " *** SUSPICIOUS ***" } else { "" };
+        let marker = if *v == sus_version {
+            " *** SUSPICIOUS ***"
+        } else {
+            ""
+        };
         eprintln!("    {:>4}  {}{}", count, v, marker);
     }
 
@@ -271,8 +324,17 @@ fn print_report(state: &CrawlState, sus_version: &str) {
         eprintln!("{}", "-".repeat(80));
         for n in &suspicious {
             let ips: Vec<&str> = n.ips.iter().map(|s| s.as_str()).collect();
-            let ips_str = if ips.is_empty() { "(no IP)".to_string() } else { ips.join(", ") };
-            eprintln!("  {}  {}  {}", &n.pubkey[..20], ips_str, n.complete_ledgers.as_deref().unwrap_or("-"));
+            let ips_str = if ips.is_empty() {
+                "(no IP)".to_string()
+            } else {
+                ips.join(", ")
+            };
+            eprintln!(
+                "  {}  {}  {}",
+                &n.pubkey[..20.min(n.pubkey.len())],
+                ips_str,
+                n.complete_ledgers.as_deref().unwrap_or("-")
+            );
         }
     }
 
@@ -302,7 +364,10 @@ fn print_report(state: &CrawlState, sus_version: &str) {
 
     if !leaks.is_empty() {
         eprintln!("\n{}", "-".repeat(80));
-        eprintln!("LEAK POINTS ({} edges between legitimate <-> suspicious)", leaks.len());
+        eprintln!(
+            "LEAK POINTS ({} edges between legitimate <-> suspicious)",
+            leaks.len()
+        );
         eprintln!("{}", "-".repeat(80));
         for (leg, sus) in &leaks {
             let leg_ips: Vec<&str> = leg.ips.iter().map(|s| s.as_str()).collect();
@@ -311,12 +376,20 @@ fn print_report(state: &CrawlState, sus_version: &str) {
                 "  legit:  {}  {}  {}",
                 &leg.pubkey[..20.min(leg.pubkey.len())],
                 leg.version.as_deref().unwrap_or("?"),
-                if leg_ips.is_empty() { "(no IP)".to_string() } else { leg_ips.join(", ") }
+                if leg_ips.is_empty() {
+                    "(no IP)".to_string()
+                } else {
+                    leg_ips.join(", ")
+                }
             );
             eprintln!(
                 "  suspc:  {}  {}",
                 &sus.pubkey[..20.min(sus.pubkey.len())],
-                if sus_ips.is_empty() { "(no IP)".to_string() } else { sus_ips.join(", ") }
+                if sus_ips.is_empty() {
+                    "(no IP)".to_string()
+                } else {
+                    sus_ips.join(", ")
+                }
             );
             eprintln!();
         }
@@ -524,7 +597,11 @@ pub fn gen_config(state_file: &str, max_peers: usize) -> Result<()> {
         if src_sus == peer_sus {
             continue;
         }
-        let leg_pk = if src_sus { edge.peer.as_str() } else { edge.source.as_str() };
+        let leg_pk = if src_sus {
+            edge.peer.as_str()
+        } else {
+            edge.source.as_str()
+        };
         if !seen.insert(leg_pk) {
             continue;
         }
@@ -580,7 +657,12 @@ pub fn gen_config(state_file: &str, max_peers: usize) -> Result<()> {
         for node in sus_with_ips.iter().take(max_peers) {
             for ep in &node.ips {
                 let (ip, port) = parse_endpoint(ep);
-                println!("{}  {}  # {}...", ip, port, &node.pubkey[..16.min(node.pubkey.len())]);
+                println!(
+                    "{}  {}  # {}...",
+                    ip,
+                    port,
+                    &node.pubkey[..16.min(node.pubkey.len())]
+                );
             }
         }
     }
@@ -588,7 +670,11 @@ pub fn gen_config(state_file: &str, max_peers: usize) -> Result<()> {
     println!("\n[relay_validations]\nall");
     println!("\n[crawl]\noverlay = 1\nserver = 1\nunl = 1");
 
-    eprintln!("\nsuspicious nodes: {} ({} with IPs)", sus_pks.len(), sus_with_ips.len());
+    eprintln!(
+        "\nsuspicious nodes: {} ({} with IPs)",
+        sus_pks.len(),
+        sus_with_ips.len()
+    );
     eprintln!("leak point nodes: {} (with IPs)", leak_nodes.len());
     Ok(())
 }

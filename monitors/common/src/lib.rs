@@ -8,6 +8,7 @@
 pub mod state;
 
 use serde::Serialize;
+use std::time::Duration;
 
 /// Alert severity, ordered least → most urgent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -110,7 +111,11 @@ pub struct Notifier {
 
 impl Notifier {
     /// `webhook == None` means dry-run: alerts are printed, never posted.
-    pub fn new(webhook: Option<String>, username: impl Into<String>, source: impl Into<String>) -> Self {
+    pub fn new(
+        webhook: Option<String>,
+        username: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Self {
         Notifier {
             webhook,
             username: username.into(),
@@ -152,18 +157,45 @@ impl Notifier {
 }
 
 /// Blocking POST of a JSON body. Used by the synchronous monitors.
+///
+/// Bounded connect/whole-call timeouts keep a hung or tarpitting host from
+/// stalling the monitor loop forever. Transient failures (transport errors,
+/// 5xx) are retried up to 3 attempts total with a short backoff; 4xx is
+/// treated as terminal.
 pub fn post_json(url: &str, body: &str) -> Result<(), String> {
-    match ureq::post(url)
-        .set("Content-Type", "application/json")
-        // The Mattermost host sits behind a WAF that 403s default client
-        // user-agents (e.g. ureq/*); send a descriptive one.
-        .set("User-Agent", "xrplf-release-notifier/monitors")
-        .send_string(body)
-    {
-        Ok(_) => Ok(()),
-        Err(ureq::Error::Status(code, _)) => Err(format!("webhook returned HTTP {code}")),
-        Err(e) => Err(format!("webhook transport error: {e}")),
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        .timeout(Duration::from_secs(15))
+        .build();
+
+    const MAX_ATTEMPTS: u32 = 3;
+    const BACKOFF: [Duration; 2] = [Duration::from_millis(500), Duration::from_secs(1)];
+
+    let mut last_err = String::new();
+    for attempt in 1..=MAX_ATTEMPTS {
+        last_err = match agent
+            .post(url)
+            .set("Content-Type", "application/json")
+            // The Mattermost host sits behind a WAF that 403s default client
+            // user-agents (e.g. ureq/*); send a descriptive one.
+            .set("User-Agent", "xrplf-release-notifier/monitors")
+            .send_string(body)
+        {
+            Ok(_) => return Ok(()),
+            // 4xx is terminal (bad request/auth/webhook config); don't retry.
+            Err(ureq::Error::Status(code, _)) if !(500..600).contains(&code) => {
+                return Err(format!("webhook returned HTTP {code}"));
+            }
+            Err(ureq::Error::Status(code, _)) => format!("webhook returned HTTP {code}"),
+            // Print only the error kind: the URL (which ureq's transport-error
+            // Display includes) carries the webhook token in its path.
+            Err(e) => format!("webhook transport error: {}", e.kind()),
+        };
+        if attempt < MAX_ATTEMPTS {
+            std::thread::sleep(BACKOFF[(attempt - 1) as usize]);
+        }
     }
+    Err(last_err)
 }
 
 /// Serialize a payload as compact JSON (helper for callers that post via their

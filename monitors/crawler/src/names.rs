@@ -15,7 +15,13 @@ pub async fn fetch(url: &str) -> anyhow::Result<HashMap<String, String>> {
         .timeout(Duration::from_secs(15))
         .user_agent("xrplf-release-notifier/monitors")
         .build()?;
-    let text = client.get(url).send().await?.error_for_status()?.text().await?;
+    let text = client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
     let map = parse(&text);
     if map.is_empty() {
         anyhow::bail!("names source parsed to 0 entries");

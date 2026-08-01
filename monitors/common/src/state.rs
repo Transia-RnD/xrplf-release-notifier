@@ -24,7 +24,8 @@ pub fn save_state<T: Serialize>(path: impl AsRef<Path>, state: &T) -> Result<(),
     let tmp = path.with_extension("tmp");
     {
         let mut f = std::fs::File::create(&tmp).map_err(|e| format!("write state tmp: {e}"))?;
-        f.write_all(&json).map_err(|e| format!("write state: {e}"))?;
+        f.write_all(&json)
+            .map_err(|e| format!("write state: {e}"))?;
         f.flush().map_err(|e| e.to_string())?;
     }
     std::fs::rename(&tmp, path).map_err(|e| format!("rename state: {e}"))

@@ -43,14 +43,20 @@ pub fn fields(buf: &[u8]) -> Result<Vec<Field<'_>>, String> {
         match key & 0x07 {
             0 => {
                 let v = read_varint(buf, &mut pos).ok_or("truncated varint")?;
-                out.push(Field { num, val: Value::Varint(v) });
+                out.push(Field {
+                    num,
+                    val: Value::Varint(v),
+                });
             }
             2 => {
                 let len = read_varint(buf, &mut pos).ok_or("truncated length")? as usize;
                 let end = pos.checked_add(len).ok_or("length overflow")?;
                 let data = buf.get(pos..end).ok_or("truncated bytes field")?;
                 pos = end;
-                out.push(Field { num, val: Value::Bytes(data) });
+                out.push(Field {
+                    num,
+                    val: Value::Bytes(data),
+                });
             }
             5 => pos += 4,
             1 => pos += 8,

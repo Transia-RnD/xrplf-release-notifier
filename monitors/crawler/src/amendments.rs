@@ -112,9 +112,7 @@ pub fn diff(
 
 /// Fetch the Amendments object from a public node via `ledger_entry`. Returns
 /// the current state plus per-hash majority close times (ripple-epoch seconds).
-pub async fn fetch(
-    endpoint: &str,
-) -> anyhow::Result<(AmendmentsState, HashMap<String, i64>)> {
+pub async fn fetch(endpoint: &str) -> anyhow::Result<(AmendmentsState, HashMap<String, i64>)> {
     #[derive(Deserialize)]
     struct Resp {
         result: ResultBody,
@@ -150,7 +148,13 @@ pub async fn fetch(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()?;
-    let resp: Resp = client.post(endpoint).json(&body).send().await?.json().await?;
+    let resp: Resp = client
+        .post(endpoint)
+        .json(&body)
+        .send()
+        .await?
+        .json()
+        .await?;
     let node = resp
         .result
         .node
@@ -202,7 +206,15 @@ pub async fn run(
     if sink.enabled() {
         let now = chrono::Utc::now().timestamp();
         for a in &alerts {
-            sink.send(a.severity, a.category, &a.key, &a.title, &a.text, a.fields.clone(), now);
+            sink.send(
+                a.severity,
+                a.category,
+                &a.key,
+                &a.title,
+                &a.text,
+                a.fields.clone(),
+                now,
+            );
         }
     }
     eprintln!(

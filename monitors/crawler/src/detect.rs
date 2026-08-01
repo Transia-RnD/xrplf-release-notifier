@@ -62,13 +62,19 @@ pub struct DetectionEngine {
 
     ledgers: HashMap<u64, LedgerWindow>,
     finalized_order: VecDeque<u64>,
+    // Observed UNL-validation count per finalized ledger, aligned with
+    // `finalized_order`. Its rolling max is the proof-of-coverage used to gate
+    // fork/quorum verdicts (don't page when we simply under-observed).
+    observed_unl_counts: VecDeque<usize>,
 
     validator_last_seen: HashMap<String, Instant>,
 
     // Per-validator record of recent finalized ledgers where they validated a
     // minority (non-agreed) hash — the basis for mini-fork / partition detection.
     minority_divergence: HashMap<String, VecDeque<u64>>,
-    mini_fork_active: bool,
+    // Last-alerted mini-fork (severity, diverging-set size), so a set that grows
+    // or escalates WARNING→CRITICAL re-fires instead of latching on the first hit.
+    mini_fork_last: Option<(&'static str, usize)>,
 
     highest_seq: u64,
     last_seq_advance: Instant,
@@ -109,9 +115,10 @@ impl DetectionEngine {
             min_validators: min,
             ledgers: HashMap::new(),
             finalized_order: VecDeque::new(),
+            observed_unl_counts: VecDeque::new(),
             validator_last_seen: HashMap::new(),
             minority_divergence: HashMap::new(),
-            mini_fork_active: false,
+            mini_fork_last: None,
             highest_seq: 0,
             last_seq_advance: now,
             chain_stalled: false,
@@ -189,40 +196,20 @@ impl DetectionEngine {
             self.chain_stalled = false;
         }
 
-        // Stall detection (check every 5s)
-        if warmed_up
-            && now.duration_since(self.last_stall_check).as_secs() > 5
-        {
-            self.last_stall_check = now;
-            let secs_since_advance = now.duration_since(self.last_seq_advance).as_secs();
-            if secs_since_advance > self.stall_secs && !self.chain_stalled {
-                self.chain_stalled = true;
-                alerts.push(Alert {
-                    ts: chrono::Utc::now().to_rfc3339(),
-                    severity: "CRITICAL",
-                    category: "CHAIN_STALL",
-                    message: format!(
-                        "No new validated ledger for {}s (last seq: {}) — chain may be stalled",
-                        secs_since_advance, self.highest_seq
-                    ),
-                    ledger_seq: Some(self.highest_seq),
-                    details: serde_json::json!({
-                        "seconds_since_advance": secs_since_advance,
-                        "last_seq": self.highest_seq,
-                    }),
-                });
-            }
-        }
+        alerts.extend(self.check_stall(now));
 
         let is_unl = self.unl_keys.contains(&mk);
-        let window = self.ledgers.entry(ledger_index).or_insert_with(|| LedgerWindow {
-            first_seen: Instant::now(),
-            hashes: HashMap::new(),
-            all_validators: HashSet::new(),
-            unl_validators: HashSet::new(),
-            finalized: false,
-            equivocators: HashSet::new(),
-        });
+        let window = self
+            .ledgers
+            .entry(ledger_index)
+            .or_insert_with(|| LedgerWindow {
+                first_seen: Instant::now(),
+                hashes: HashMap::new(),
+                all_validators: HashSet::new(),
+                unl_validators: HashSet::new(),
+                finalized: false,
+                equivocators: HashSet::new(),
+            });
 
         if !window.finalized {
             // EQUIVOCATION: this validator already signed a DIFFERENT hash for the
@@ -273,27 +260,91 @@ impl DetectionEngine {
         alerts
     }
 
+    /// Time-driven chain-stall check (throttled to ~5s). Fires CHAIN_STALL when no
+    /// new validated ledger has advanced for `stall_secs`. Called both on inbound
+    /// validations and from the wall-clock `tick`, so a total stream silence
+    /// (all endpoints disconnected) still trips it. Requires `highest_seq > 0` so
+    /// a monitor that never connected doesn't cry stall at startup.
+    fn check_stall(&mut self, now: Instant) -> Vec<Alert> {
+        let mut alerts = Vec::new();
+        let warmed_up = now.duration_since(self.started_at).as_secs() > self.warmup_secs;
+        if !warmed_up || now.duration_since(self.last_stall_check).as_secs() <= 5 {
+            return alerts;
+        }
+        self.last_stall_check = now;
+        let secs_since_advance = now.duration_since(self.last_seq_advance).as_secs();
+        if secs_since_advance > self.stall_secs && !self.chain_stalled && self.highest_seq > 0 {
+            self.chain_stalled = true;
+            alerts.push(Alert {
+                ts: chrono::Utc::now().to_rfc3339(),
+                severity: "CRITICAL",
+                category: "CHAIN_STALL",
+                message: format!(
+                    "No new validated ledger for {}s (last seq: {}) — chain may be stalled",
+                    secs_since_advance, self.highest_seq
+                ),
+                ledger_seq: Some(self.highest_seq),
+                details: serde_json::json!({
+                    "seconds_since_advance": secs_since_advance,
+                    "last_seq": self.highest_seq,
+                }),
+            });
+        }
+        alerts
+    }
+
+    /// Wall-clock driven checks. The monitor's `select!` loop calls this on a fixed
+    /// interval so stall + silence + window finalization fire during a *total*
+    /// outage (quorum loss / all streams silent), when no inbound validation would
+    /// otherwise drive them — the exact conditions CHAIN_STALL / VALIDATORS_SILENT
+    /// exist to catch.
+    pub fn tick(&mut self) -> Vec<Alert> {
+        let now = Instant::now();
+        if now.duration_since(self.started_at).as_secs() <= self.warmup_secs {
+            return Vec::new();
+        }
+        let mut alerts = self.check_stall(now);
+        alerts.extend(self.finalize_old_windows());
+        if self.last_silence_check.elapsed() > std::time::Duration::from_secs(30) {
+            alerts.extend(self.check_silence());
+            self.last_silence_check = Instant::now();
+        }
+        alerts
+    }
+
     fn finalize_old_windows(&mut self) -> Vec<Alert> {
         let mut alerts = Vec::new();
         let now = Instant::now();
         let warmed_up = now.duration_since(self.started_at).as_secs() > self.warmup_secs;
         let window_duration = std::time::Duration::from_secs(self.window_secs);
 
-        let seqs_to_finalize: Vec<u64> = self
+        // Process in ascending seq order so minority_divergence deque front-pruning
+        // over the MINI_FORK_WINDOW stays monotonic (HashMap iteration is unordered).
+        let mut seqs_to_finalize: Vec<u64> = self
             .ledgers
             .iter()
             .filter(|(_, w)| !w.finalized && now.duration_since(w.first_seen) > window_duration)
             .map(|(seq, _)| *seq)
             .collect();
+        seqs_to_finalize.sort_unstable();
 
         for seq in seqs_to_finalize {
             if let Some(window) = self.ledgers.get_mut(&seq) {
                 window.finalized = true;
                 self.finalized_order.push_back(seq);
+                self.observed_unl_counts
+                    .push_back(window.unl_validators.len());
 
                 if !warmed_up {
                     continue;
                 }
+
+                // Proof-of-coverage: only trust fork/quorum verdicts once the
+                // pipeline has actually observed >= quorum UNL validators for some
+                // recent ledger. A single laggy endpoint that under-counts must not
+                // fire FORK/LOW_QUORUM every ledger on a healthy network.
+                let coverage_ok = self.observed_unl_counts.iter().copied().max().unwrap_or(0)
+                    >= self.min_validators;
 
                 // --- FORK DETECTION ---
                 if window.hashes.len() > 1 {
@@ -327,14 +378,15 @@ impl DetectionEngine {
                         // No UNL to judge quorum: require a roughly balanced split
                         // (minority branch ≥ 25% of validators).
                         let total = window.all_validators.len();
-                        let max_total =
-                            window.hashes.values().map(|v| v.len()).max().unwrap_or(0);
+                        let max_total = window.hashes.values().map(|v| v.len()).max().unwrap_or(0);
                         total.saturating_sub(max_total) * 4 >= total
                     } else {
                         max_branch_unl < self.min_validators
                     };
 
-                    if real_fork {
+                    // Gate on coverage (S8): with a UNL, only alert once we've proven
+                    // the pipeline can see quorum, so under-observation doesn't fire.
+                    if real_fork && (self.unl_keys.is_empty() || coverage_ok) {
                         alerts.push(Alert {
                             ts: chrono::Utc::now().to_rfc3339(),
                             severity: "CRITICAL",
@@ -346,8 +398,11 @@ impl DetectionEngine {
                                 window.hashes.len(),
                                 self.min_validators
                             ),
-                            ledger_seq: Some(seq),
-                            details: serde_json::json!({ "branches": fork_details }),
+                            // Stable category-level latch key (ledger_seq -> None):
+                            // a sustained fork dedups to once/24h instead of paging
+                            // every ~12s as the affected ledger changes.
+                            ledger_seq: None,
+                            details: serde_json::json!({ "ledger_index": seq, "branches": fork_details }),
                         });
                     }
 
@@ -356,7 +411,9 @@ impl DetectionEngine {
                     let majority_hash = window
                         .hashes
                         .iter()
-                        .max_by_key(|(_, vs)| vs.iter().filter(|v| self.unl_keys.contains(*v)).count())
+                        .max_by_key(|(_, vs)| {
+                            vs.iter().filter(|v| self.unl_keys.contains(*v)).count()
+                        })
                         .map(|(h, _)| h.clone());
                     if let Some(maj) = majority_hash {
                         for (hash, validators) in &window.hashes {
@@ -391,38 +448,52 @@ impl DetectionEngine {
                             persistent.push(v.clone());
                         }
                     }
-                    if !persistent.is_empty() && !self.mini_fork_active {
-                        self.mini_fork_active = true;
+                    if persistent.is_empty() {
+                        self.mini_fork_last = None;
+                    } else {
+                        persistent.sort();
                         let quorum_gap = self.unl_keys.len().saturating_sub(self.min_validators);
                         let severity = if persistent.len() >= quorum_gap {
                             "CRITICAL"
                         } else {
                             "WARNING"
                         };
-                        persistent.sort();
-                        let named = labels(&self.names, &persistent);
-                        alerts.push(Alert {
-                            ts: chrono::Utc::now().to_rfc3339(),
-                            severity,
-                            category: "MINI_FORK",
-                            message: format!(
-                                "{} validator(s) persistently on a minority branch over the last {} ledgers ({}) — possible partition or private-peer cluster",
-                                persistent.len(),
-                                MINI_FORK_WINDOW,
-                                named.join(", ")
-                            ),
-                            ledger_seq: None,
-                            details: serde_json::json!({ "validators": named, "validator_keys": persistent }),
-                        });
-                    } else if persistent.is_empty() {
-                        self.mini_fork_active = false;
+                        let size = persistent.len();
+                        // Re-fire on escalation only: severity climbing to CRITICAL,
+                        // or the diverging set growing. Steady state stays latched.
+                        let escalated = match self.mini_fork_last {
+                            None => true,
+                            Some((last_sev, last_size)) => {
+                                (severity == "CRITICAL" && last_sev != "CRITICAL")
+                                    || size > last_size
+                            }
+                        };
+                        if escalated {
+                            self.mini_fork_last = Some((severity, size));
+                            let named = labels(&self.names, &persistent);
+                            alerts.push(Alert {
+                                ts: chrono::Utc::now().to_rfc3339(),
+                                severity,
+                                category: "MINI_FORK",
+                                message: format!(
+                                    "{} validator(s) persistently on a minority branch over the last {} ledgers ({}) — possible partition or private-peer cluster",
+                                    persistent.len(),
+                                    MINI_FORK_WINDOW,
+                                    named.join(", ")
+                                ),
+                                ledger_seq: None,
+                                details: serde_json::json!({ "validators": named, "validator_keys": persistent }),
+                            });
+                        }
                     }
                 }
 
                 // --- QUORUM CHECK ---
                 if !self.unl_keys.is_empty() {
                     let unl_count = window.unl_validators.len();
-                    if unl_count < self.min_validators {
+                    // Gate on coverage (S8): a single under-observing endpoint must
+                    // not report every ledger as low-quorum on a healthy network.
+                    if unl_count < self.min_validators && coverage_ok {
                         let missing: Vec<String> = self
                             .unl_keys
                             .iter()
@@ -448,8 +519,11 @@ impl DetectionEngine {
                                 self.min_validators,
                                 missing.len()
                             ),
-                            ledger_seq: Some(seq),
+                            // Stable per-severity latch key (ledger_seq -> None) so a
+                            // sustained low-quorum dedups to once/24h (S7).
+                            ledger_seq: None,
                             details: serde_json::json!({
+                                "ledger_index": seq,
                                 "unl_count": unl_count,
                                 "unl_size": self.unl_keys.len(),
                                 "min_required": self.min_validators,
@@ -462,6 +536,7 @@ impl DetectionEngine {
         }
 
         while self.finalized_order.len() > self.max_windows {
+            self.observed_unl_counts.pop_front();
             if let Some(old_seq) = self.finalized_order.pop_front() {
                 self.ledgers.remove(&old_seq);
             }
@@ -482,12 +557,23 @@ impl DetectionEngine {
         let mut silent: Vec<String> = Vec::new();
         let mut never_seen: Vec<String> = Vec::new();
 
+        // Pipeline-ready = we've actually observed a quorum-sized set of distinct
+        // UNL validators at least once. Until then, a not-yet-seen UNL key is
+        // startup/relay lag on a sparse endpoint, not an outage — so don't count
+        // `never_seen` and fabricate a cold-start "QUORUM LOST" (S9).
+        let unl_seen_ever = self
+            .unl_keys
+            .iter()
+            .filter(|k| self.validator_last_seen.contains_key(*k))
+            .count();
+        let pipeline_ready = unl_seen_ever >= self.min_validators;
+
         for key in &self.unl_keys {
             match self.validator_last_seen.get(key) {
                 Some(last) if now.duration_since(*last) > threshold => {
                     silent.push(key.clone());
                 }
-                None if self.highest_seq > 0 => {
+                None if self.highest_seq > 0 && pipeline_ready => {
                     never_seen.push(key.clone());
                 }
                 _ => {}
@@ -501,7 +587,9 @@ impl DetectionEngine {
         // quorum, CRITICAL once quorum is gone. `multi_silence_threshold` is a
         // floor so small/test UNLs still trip.
         let quorum_gap = self.unl_keys.len().saturating_sub(self.min_validators);
-        let warn_at = quorum_gap.saturating_sub(1).max(self.multi_silence_threshold);
+        let warn_at = quorum_gap
+            .saturating_sub(1)
+            .max(self.multi_silence_threshold);
 
         if total_missing >= warn_at {
             let quorum_lost = total_missing > quorum_gap;
@@ -597,6 +685,14 @@ impl DetectionEngine {
     fn force_warmup(&mut self) {
         self.started_at = Instant::now() - std::time::Duration::from_secs(3600);
     }
+
+    /// Backdate the last-advance / last-stall-check markers so a stall condition
+    /// is testable without waiting real wall-clock time.
+    fn backdate_advance(&mut self, secs: u64) {
+        let d = std::time::Duration::from_secs(secs);
+        self.last_seq_advance = Instant::now() - d;
+        self.last_stall_check = Instant::now() - d;
+    }
 }
 
 #[cfg(test)]
@@ -613,7 +709,9 @@ mod tests {
         e.force_warmup();
         e.process_validation(Some("VAL1"), "HASH_A", 100);
         let a = e.process_validation(Some("VAL1"), "HASH_B", 100);
-        assert!(a.iter().any(|x| x.category == "EQUIVOCATION" && x.severity == "CRITICAL"));
+        assert!(a
+            .iter()
+            .any(|x| x.category == "EQUIVOCATION" && x.severity == "CRITICAL"));
         // repeat of the same conflicting hash does not re-alert for this ledger
         let again = e.process_validation(Some("VAL1"), "HASH_B", 100);
         assert!(!again.iter().any(|x| x.category == "EQUIVOCATION"));
@@ -626,5 +724,35 @@ mod tests {
         e.process_validation(Some("VAL1"), "HASH_A", 100);
         let a = e.process_validation(Some("VAL2"), "HASH_A", 100);
         assert!(!a.iter().any(|x| x.category == "EQUIVOCATION"));
+    }
+
+    // B4: the wall-clock tick must drive CHAIN_STALL even when no validation
+    // arrives (total outage → stream silent). Previously the stall check only ran
+    // inside process_validation, so a total silence could never trip it.
+    #[test]
+    fn tick_fires_chain_stall_without_inbound() {
+        let mut e = DetectionEngine::new(unl(&["VAL1"]), Some(1));
+        e.force_warmup();
+        // Chain advanced once, then the stream goes silent.
+        e.process_validation(Some("VAL1"), "HASH_A", 500);
+        e.backdate_advance(3600);
+        let a = e.tick();
+        assert!(a
+            .iter()
+            .any(|x| x.category == "CHAIN_STALL" && x.severity == "CRITICAL"));
+    }
+
+    // S9: a monitor that has only ever seen a handful of UNL validators (sparse
+    // endpoint / startup lag) must not emit a "QUORUM LOST" from `never_seen` keys.
+    #[test]
+    fn no_cold_start_false_quorum_lost() {
+        let keys: Vec<String> = (0..10).map(|i| format!("V{i}")).collect();
+        let mut e = DetectionEngine::new(keys.iter().cloned().collect(), Some(8));
+        e.force_warmup();
+        // Pipeline has relayed only 2 of the 10 UNL validators so far.
+        e.process_validation(Some("V0"), "HASH_A", 100);
+        e.process_validation(Some("V1"), "HASH_A", 100);
+        let a = e.check_silence();
+        assert!(!a.iter().any(|x| x.category == "VALIDATORS_SILENT"));
     }
 }

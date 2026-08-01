@@ -274,7 +274,7 @@ export async function handleMonitors(
   const { alerts, state } = await runWatchdog(
     config.mattermostWebhookUrl,
     storage,
-    { dryRun }
+    { dryRun, logger }
   )
   logger.info('Watchdog run complete', { alertCount: alerts.length, dryRun })
   res.status(200).json({
