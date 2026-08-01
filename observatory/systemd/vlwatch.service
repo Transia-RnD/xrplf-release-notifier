@@ -6,8 +6,10 @@ Wants=network-online.target
 [Service]
 User=observatory
 EnvironmentFile=/etc/observatory.env
+# $MONITOR_FLAGS (from /etc/observatory.env) is either `--webhook <url>` (live)
+# or `--dry-run` (silent). systemd splits the unbraced $VAR into separate args.
 ExecStart=/opt/observatory/bin/vlwatch \
-  --webhook ${MATTERMOST_WEBHOOK_URL} \
+  $MONITOR_FLAGS \
   --state-file /var/lib/observatory/vlwatch-state.json \
   --publishers /opt/observatory/publishers.txt
 Restart=always

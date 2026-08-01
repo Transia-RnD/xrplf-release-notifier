@@ -12,7 +12,7 @@ ExecStart=/opt/observatory/bin/xrpl-crawler monitor \
   --state-file /var/lib/observatory/crawl-state.json \
   --output /var/lib/observatory/validations.jsonl \
   --alerts /var/lib/observatory/alerts.jsonl \
-  --webhook ${MATTERMOST_WEBHOOK_URL} \
+  $MONITOR_FLAGS \
   --webhook-state /var/lib/observatory/monitor-alert-state.json
 Restart=always
 RestartSec=10

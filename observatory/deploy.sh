@@ -5,8 +5,10 @@
 #
 # Usage: HOST=observatory@<ip> ./deploy.sh
 #   env: HOST (required)  SSH_KEY (default ~/.ssh/xrpl-labs)
-#        GCS_SA_KEY (optional path to a GCP SA key JSON; enables the heartbeat on
-#                    a non-GCP host — e.g. Proxmox — where metadata auth is absent)
+#        SILENT (default 1) — 1: monitors run in --dry-run (log would-be alerts to
+#               the journal, post NOTHING). 0: post live to Mattermost.
+#        GCS_SA_KEY (optional path to a GCP SA key JSON; only needed for the
+#               heartbeat on a non-GCP host — on GCP the VM SA covers it)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -56,9 +58,18 @@ rsync -az -e "$RSYNC_RSH" "$HERE/heartbeat.sh" "$HOST:/tmp/heartbeat.sh"
   sudo install -m0755 /tmp/heartbeat.sh /opt/observatory/heartbeat.sh'
 
 echo "==> writing /etc/observatory.env"
+# Silent by default: monitors evaluate rules and log would-be alerts to the
+# journal but post nothing. SILENT=0 switches them to live posting.
+if [ "${SILENT:-1}" = "0" ]; then
+  MONITOR_FLAGS="--webhook $WEBHOOK"
+  echo "    posting: LIVE"
+else
+  MONITOR_FLAGS="--dry-run"
+  echo "    posting: SILENT (--dry-run; nothing posts to Mattermost)"
+fi
 GCREDS=""
 [ -n "${GCS_SA_KEY:-}" ] && GCREDS='GOOGLE_APPLICATION_CREDENTIALS=/etc/observatory-sa.json\n'
-"${SSH[@]}" "printf 'MATTERMOST_WEBHOOK_URL=%s\nOBSERVATORY_STATE_BUCKET=xrplf-release-notifier\n${GCREDS}' '$WEBHOOK' | sudo tee /etc/observatory.env >/dev/null && sudo chmod 600 /etc/observatory.env"
+"${SSH[@]}" "printf 'MONITOR_FLAGS=%s\nOBSERVATORY_STATE_BUCKET=xrplf-release-notifier\n${GCREDS}' '$MONITOR_FLAGS' | sudo tee /etc/observatory.env >/dev/null && sudo chmod 600 /etc/observatory.env"
 
 echo "==> installing systemd units"
 rsync -az -e "$RSYNC_RSH" "$HERE/systemd/" "$HOST:/tmp/observatory-units/"
