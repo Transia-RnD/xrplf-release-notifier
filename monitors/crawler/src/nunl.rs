@@ -3,7 +3,7 @@
 //! The Negative UNL is the set of validators temporarily removed from quorum for
 //! being unreliable/offline. Poll the singleton NegativeUNL object (public
 //! `ledger_entry`), diff against the previous poll, and alert on validators being
-//! disabled, re-enabled, or pending either at the next flag ledger.
+//! added to or removed from the Negative UNL.
 
 use crate::webhook::AlertSink;
 use monitor_common::{state as cstate, Severity};
@@ -46,13 +46,11 @@ pub const NEGATIVE_UNL_INDEX: &str =
 #[derive(Default, Serialize, Deserialize, Clone)]
 pub struct NunlState {
     pub disabled: Vec<String>,
-    pub to_disable: Option<String>,
-    pub to_reenable: Option<String>,
 }
 
 impl NunlState {
     fn is_seeded(&self) -> bool {
-        !self.disabled.is_empty() || self.to_disable.is_some() || self.to_reenable.is_some()
+        !self.disabled.is_empty()
     }
 }
 
@@ -108,32 +106,6 @@ pub fn diff(
             });
         }
     }
-    if fresh.to_disable != prev.to_disable {
-        if let Some(v) = &fresh.to_disable {
-            let n = name_of(names, v);
-            alerts.push(NunlAlert {
-                severity: Severity::Warning,
-                category: "NUNL_PENDING_DISABLE",
-                key: v.clone(),
-                title: format!("Validator {n} pending disable"),
-                text: format!("{n} (`{v}`) is scheduled to be added to the Negative UNL at the next flag ledger."),
-                fields: vec![("validator".into(), n)],
-            });
-        }
-    }
-    if fresh.to_reenable != prev.to_reenable {
-        if let Some(v) = &fresh.to_reenable {
-            let n = name_of(names, v);
-            alerts.push(NunlAlert {
-                severity: Severity::Info,
-                category: "NUNL_PENDING_REENABLE",
-                key: v.clone(),
-                title: format!("Validator {n} pending re-enable"),
-                text: format!("{n} (`{v}`) is scheduled to leave the Negative UNL at the next flag ledger."),
-                fields: vec![("validator".into(), n)],
-            });
-        }
-    }
     alerts
 }
 
@@ -150,10 +122,6 @@ pub async fn fetch(endpoint: &str) -> anyhow::Result<NunlState> {
     struct Node {
         #[serde(rename = "DisabledValidators", default)]
         disabled: Vec<DisabledWrap>,
-        #[serde(rename = "ValidatorToDisable")]
-        to_disable: Option<String>,
-        #[serde(rename = "ValidatorToReEnable")]
-        to_reenable: Option<String>,
     }
     #[derive(Deserialize)]
     struct DisabledWrap {
@@ -181,8 +149,6 @@ pub async fn fetch(endpoint: &str) -> anyhow::Result<NunlState> {
     };
     Ok(NunlState {
         disabled: node.disabled.into_iter().map(|d| d.inner.public_key).collect(),
-        to_disable: node.to_disable,
-        to_reenable: node.to_reenable,
     })
 }
 
@@ -227,7 +193,6 @@ mod tests {
     fn st(disabled: &[&str]) -> NunlState {
         NunlState {
             disabled: disabled.iter().map(|s| s.to_string()).collect(),
-            ..Default::default()
         }
     }
 
@@ -243,16 +208,5 @@ mod tests {
         let a = diff(&prev, &fresh, false, &HashMap::new());
         assert!(a.iter().any(|x| x.category == "NUNL_DISABLED" && x.key == "EDBBB"));
         assert!(a.iter().any(|x| x.category == "NUNL_REENABLED" && x.key == "EDAAA"));
-    }
-
-    #[test]
-    fn pending_disable_alerts_on_change() {
-        let prev = NunlState::default();
-        let fresh = NunlState {
-            to_disable: Some("EDCCC".into()),
-            ..Default::default()
-        };
-        let a = diff(&prev, &fresh, false, &HashMap::new());
-        assert!(a.iter().any(|x| x.category == "NUNL_PENDING_DISABLE"));
     }
 }

@@ -67,14 +67,12 @@ enabled + majority sets. Cold start (no prior state) seeds silently.
 
 ## crawler `nunl` — Negative UNL tracking (periodic, observatory VM)
 
-Polls the on-ledger NegativeUNL object and diffs the disabled/pending sets.
+Polls the on-ledger NegativeUNL object and diffs the disabled set.
 
 | Alert | Severity | Fires when | Dedup |
 |-------|----------|-----------|-------|
 | `NUNL_DISABLED` | WARNING | A validator is added to the Negative UNL (unreliable/offline) | per validator, 24h |
 | `NUNL_REENABLED` | INFO | A validator recovers and leaves the Negative UNL | per validator, 24h |
-| `NUNL_PENDING_DISABLE` | WARNING | A validator is scheduled to be disabled at the next flag ledger | per validator, 24h |
-| `NUNL_PENDING_REENABLE` | INFO | A validator is scheduled to be re-enabled at the next flag ledger | per validator, 24h |
 
 ## crawler `monitor --min-version` — validator upgrade adoption (post-hotfix)
 
