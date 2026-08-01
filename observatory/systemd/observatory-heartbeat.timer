@@ -1,9 +1,9 @@
 [Unit]
-Description=Publish observatory heartbeat every 10 minutes
+Description=Publish observatory heartbeat every minute
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=10min
+OnBootSec=1min
+OnUnitActiveSec=1min
 
 [Install]
 WantedBy=timers.target

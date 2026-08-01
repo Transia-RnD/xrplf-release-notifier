@@ -1,9 +1,9 @@
 [Unit]
-Description=Track amendment state every 30 minutes
+Description=Track amendment state every minute
 
 [Timer]
-OnBootSec=3min
-OnUnitActiveSec=30min
+OnBootSec=1min
+OnUnitActiveSec=1min
 
 [Install]
 WantedBy=timers.target

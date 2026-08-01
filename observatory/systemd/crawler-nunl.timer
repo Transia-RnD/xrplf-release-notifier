@@ -1,9 +1,9 @@
 [Unit]
-Description=Track the Negative UNL every 15 minutes
+Description=Track the Negative UNL every minute
 
 [Timer]
-OnBootSec=4min
-OnUnitActiveSec=15min
+OnBootSec=1min
+OnUnitActiveSec=1min
 
 [Install]
 WantedBy=timers.target
