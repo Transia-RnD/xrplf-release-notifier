@@ -26,7 +26,7 @@ echo "==> ensuring toolchain on $HOST (rustup, build deps, gcloud)"
   sudo install -d -o observatory -g observatory /opt/observatory /var/lib/observatory
   export DEBIAN_FRONTEND=noninteractive
   sudo apt-get update -qq
-  sudo apt-get install -y -qq build-essential pkg-config perl make git rsync curl
+  sudo apt-get install -y -qq build-essential pkg-config libssl-dev git rsync curl
   # gcloud (for the heartbeat) is not in the base apt repos — use snap, best-effort.
   command -v gcloud >/dev/null || sudo snap install google-cloud-cli --classic || echo "WARN: gcloud not installed — heartbeat will be skipped"
   sudo -u observatory bash -lc "command -v cargo >/dev/null || (curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y)"'

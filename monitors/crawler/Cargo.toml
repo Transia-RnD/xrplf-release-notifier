@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 monitor-common = { path = "../common" }
-openssl = { version = "0.10", features = ["vendored"] }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
