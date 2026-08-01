@@ -1,0 +1,22 @@
+[Unit]
+Description=xrpl-crawler monitor — validations-stream fork/quorum/stall detection
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=observatory
+EnvironmentFile=/etc/observatory.env
+ExecStart=/opt/observatory/bin/xrpl-crawler monitor \
+  --endpoints wss://s1.ripple.com,wss://s2.ripple.com \
+  --unl-file /opt/observatory/mainnet-unl.txt \
+  --state-file /var/lib/observatory/crawl-state.json \
+  --output /var/lib/observatory/validations.jsonl \
+  --alerts /var/lib/observatory/alerts.jsonl \
+  --webhook ${MATTERMOST_WEBHOOK_URL} \
+  --webhook-state /var/lib/observatory/monitor-alert-state.json
+Restart=always
+RestartSec=10
+StateDirectory=observatory
+
+[Install]
+WantedBy=multi-user.target

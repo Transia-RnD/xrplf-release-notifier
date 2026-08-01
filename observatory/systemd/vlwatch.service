@@ -1,0 +1,18 @@
+[Unit]
+Description=vlwatch — passive XRPL overlay UNL-propagation monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=observatory
+EnvironmentFile=/etc/observatory.env
+ExecStart=/opt/observatory/bin/vlwatch \
+  --webhook ${MATTERMOST_WEBHOOK_URL} \
+  --state-file /var/lib/observatory/vlwatch-state.json \
+  --publishers /opt/observatory/publishers.txt
+Restart=always
+RestartSec=10
+StateDirectory=observatory
+
+[Install]
+WantedBy=multi-user.target

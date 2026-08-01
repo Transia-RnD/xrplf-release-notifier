@@ -1,0 +1,17 @@
+[Unit]
+Description=xrpl-crawler crawl — hourly topology/eclipse/version snapshot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=observatory
+EnvironmentFile=/etc/observatory.env
+ExecStart=/opt/observatory/bin/xrpl-crawler crawl \
+  --seeds r.ripple.com:51235,zaphod.alloy.ee:51235,s1.ripple.com:51235,s2.ripple.com:51235 \
+  --concurrency 60 --timeout 6 \
+  --output /var/lib/observatory/crawl-state.json \
+  --report-json /var/lib/observatory/crawl-report.json \
+  --webhook ${MATTERMOST_WEBHOOK_URL} \
+  --webhook-state /var/lib/observatory/crawl-alert-state.json
+StateDirectory=observatory
