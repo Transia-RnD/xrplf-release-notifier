@@ -17,10 +17,11 @@ use std::collections::HashMap;
 /// Expiry thresholds (days remaining) and their severities.
 pub const EXPIRY_WARN_DAYS: i64 = 14;
 pub const EXPIRY_CRIT_DAYS: i64 = 7;
-/// No validator list from any peer for this long (while connected) → NO_DATA.
-pub const NO_DATA_SECS: i64 = 1800;
-/// An allowlisted publisher unseen for this long → PUBLISHER_MISSING.
-pub const PUBLISHER_MISSING_SECS: i64 = 3600;
+/// No active peer connections for this long → NO_PEERS (overlay unreachable).
+/// Note: "no new lists" is NOT a fault — validator lists only gossip on peer
+/// connect or when a publisher issues a new one, so a healthy watcher can go
+/// hours without list traffic.
+pub const NO_PEERS_SECS: i64 = 600;
 /// Peers must disagree on a publisher's sequence for this long → UNL_DIVERGENCE
 /// (normal relay lag is seconds; a sustained gap means a split or stuck hub).
 pub const DIVERGENCE_GRACE_SECS: i64 = 600;
@@ -214,78 +215,41 @@ pub fn evaluate(
     alerts
 }
 
-/// In-memory dedup for the time-based rules (not persisted — scoped to a run).
+/// In-memory dedup for the periodic health rule (scoped to a run).
 #[derive(Default)]
 pub struct PeriodicFired {
-    pub no_data: bool,
-    pub missing: std::collections::HashSet<String>,
+    pub no_peers: bool,
 }
 
-/// Time-based rules evaluated on a periodic tick.
+/// Health check on a periodic tick: alert only when vlwatch has **no active peer
+/// connections** for [`NO_PEERS_SECS`] — meaning it genuinely can't observe the
+/// overlay. Absence of *new list* traffic is deliberately NOT alerted, since
+/// lists only gossip on connect or on a publisher update.
 ///
-/// `last_vl_unix` is when any list was last observed this run (None if never);
-/// `connected` is whether at least one peer is currently up.
+/// `last_peer_unix` is the last time ≥1 peer was connected (or the start time).
 pub fn evaluate_periodic(
-    state: &VlState,
-    allowlist: &HashMap<String, String>,
     now_unix: i64,
-    started_unix: i64,
-    last_vl_unix: Option<i64>,
-    connected: bool,
+    active_peers: usize,
+    last_peer_unix: i64,
     fired: &mut PeriodicFired,
 ) -> Vec<Alert> {
     let mut alerts = Vec::new();
-
-    // NO_DATA — connected but silent for NO_DATA_SECS. Fire once per gap.
-    if connected {
-        let quiet_since = last_vl_unix.unwrap_or(started_unix);
-        if now_unix - quiet_since >= NO_DATA_SECS {
-            if !fired.no_data {
-                fired.no_data = true;
-                alerts.push(Alert::new(
-                    Severity::Warning,
-                    "NO_DATA",
-                    "No validator lists received",
-                    format!(
-                        "Connected to peers but no UNL gossip for {}+ minutes — the overlay watcher may be wedged.",
-                        NO_DATA_SECS / 60
-                    ),
-                ));
-            }
-        } else {
-            fired.no_data = false;
+    if active_peers == 0 {
+        if now_unix - last_peer_unix >= NO_PEERS_SECS && !fired.no_peers {
+            fired.no_peers = true;
+            alerts.push(Alert::new(
+                Severity::Warning,
+                "NO_PEERS",
+                "Overlay watcher has no peer connections",
+                format!(
+                    "vlwatch has had no connected peers for {}+ minutes — it can't observe the network (check connectivity / peer hosts).",
+                    NO_PEERS_SECS / 60
+                ),
+            ));
         }
+    } else {
+        fired.no_peers = false;
     }
-
-    // PUBLISHER_MISSING — an allowlisted publisher unseen for too long. Only
-    // meaningful once we've been running long enough to have observed it.
-    if now_unix - started_unix >= PUBLISHER_MISSING_SECS {
-        for (key, label) in allowlist {
-            let last_seen = state.publishers.get(key).map(|p| p.last_seen_unix).unwrap_or(0);
-            let missing = last_seen == 0 || now_unix - last_seen >= PUBLISHER_MISSING_SECS;
-            if missing {
-                if !fired.missing.contains(key) {
-                    fired.missing.insert(key.clone());
-                    alerts.push(
-                        Alert::new(
-                            Severity::Warning,
-                            "PUBLISHER_MISSING",
-                            format!("{label} UNL not seen"),
-                            format!(
-                                "No validator list from {label} in over {} minutes of observation.",
-                                PUBLISHER_MISSING_SECS / 60
-                            ),
-                        )
-                        .field("publisher", label.clone())
-                        .field("key", key.clone()),
-                    );
-                }
-            } else {
-                fired.missing.remove(key);
-            }
-        }
-    }
-
     alerts
 }
 
@@ -477,13 +441,16 @@ mod tests {
     }
 
     #[test]
-    fn periodic_no_data_fires_once() {
-        let st = VlState::default();
+    fn no_peers_fires_once_and_recovers() {
         let mut fired = PeriodicFired::default();
-        let start = NOW - 4000;
-        let a = evaluate_periodic(&st, &allow(), NOW, start, None, true, &mut fired);
-        assert!(a.iter().any(|x| x.category == "NO_DATA"));
-        let a2 = evaluate_periodic(&st, &allow(), NOW, start, None, true, &mut fired);
-        assert!(!a2.iter().any(|x| x.category == "NO_DATA"));
+        let last_peer = NOW - NO_PEERS_SECS - 10; // no peers for > window
+        let a = evaluate_periodic(NOW, 0, last_peer, &mut fired);
+        assert!(a.iter().any(|x| x.category == "NO_PEERS"));
+        // still no peers → no repeat
+        let a2 = evaluate_periodic(NOW + 30, 0, last_peer, &mut fired);
+        assert!(a2.is_empty());
+        // a peer reconnects → clears; and a brief gap does not alert
+        assert!(evaluate_periodic(NOW + 60, 3, NOW + 60, &mut fired).is_empty());
+        assert!(evaluate_periodic(NOW + 90, 0, NOW + 60, &mut fired).is_empty());
     }
 }

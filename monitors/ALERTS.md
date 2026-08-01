@@ -21,8 +21,7 @@ absolute security rules still fire.
 | `UNKNOWN_PUBLISHER` | CRITICAL | A list from a key not in the publisher allowlist is propagating | once per key |
 | `SEQ_REGRESSION` | WARNING | Observed sequence is below the known max (rollback / stale relay) | per (publisher, seq) |
 | `EXPIRY_HORIZON` | WARNING <14d / CRITICAL <7d | The current list is nearing its expiration | once per (publisher, seq, threshold) |
-| `NO_DATA` | WARNING | Connected to peers but no list gossip for 30 min (watcher wedged) | once per gap |
-| `PUBLISHER_MISSING` | WARNING | An allowlisted publisher unseen for >1h of observation | once per publisher until seen |
+| `NO_PEERS` | WARNING | vlwatch has **no active peer connections** for 10 min — can't observe the overlay (not "no new lists", which is normal — lists only gossip on connect/change) | once per gap |
 | `UNL_DIVERGENCE` | WARNING | ≥2 fresh peers advertise different current sequences for a publisher for >10 min (relay split / stuck hub) | once per episode |
 
 ## crawler `monitor` — validations stream (always-on, observatory VM)

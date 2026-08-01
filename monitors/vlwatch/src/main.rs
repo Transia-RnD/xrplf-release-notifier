@@ -187,9 +187,8 @@ fn main() {
     }
     let mut periodic = PeriodicFired::default();
     let mut divergence = DivergenceTracker::default();
-    let mut connected = false;
-    let mut last_vl_unix: Option<i64> = None;
-    let started_unix = now_unix();
+    let mut active_peers: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut last_peer_unix = now_unix();
     let mut last_periodic = Instant::now();
 
     let persist = |st: &VlState| {
@@ -226,15 +225,11 @@ fn main() {
         // Periodic time-based rules (~every 30s) while alerting.
         if alerting && last_periodic.elapsed() >= Duration::from_secs(30) {
             last_periodic = Instant::now();
-            let alerts = alert::evaluate_periodic(
-                &vl_state,
-                &allowlist,
-                now_unix(),
-                started_unix,
-                last_vl_unix,
-                connected,
-                &mut periodic,
-            );
+            if !active_peers.is_empty() {
+                last_peer_unix = now_unix();
+            }
+            let alerts =
+                alert::evaluate_periodic(now_unix(), active_peers.len(), last_peer_unix, &mut periodic);
             if let Err(e) = notifier.send(&alerts) {
                 eprintln!("vlwatch: notify failed: {e}");
             }
@@ -250,7 +245,8 @@ fn main() {
         };
         match ev {
             Event::Connected { peer, negotiated } => {
-                connected = true;
+                active_peers.insert(peer.clone());
+                last_peer_unix = now_unix();
                 if json {
                     println!("{}", serde_json::json!({"event":"connected","peer":peer,"protocol":negotiated}));
                 } else {
@@ -258,6 +254,7 @@ fn main() {
                 }
             }
             Event::Disconnected { peer, reason } => {
+                active_peers.remove(&peer);
                 if json {
                     println!("{}", serde_json::json!({"event":"disconnected","peer":peer,"reason":reason}));
                 } else {
@@ -286,7 +283,6 @@ fn main() {
                     .or_else(|| rec.domain.clone())
                     .unwrap_or_else(|| rec.publisher_b58.clone());
                 if alerting {
-                    last_vl_unix = Some(now_unix());
                     let obs = VlObservation {
                         publisher_key: &rec.publisher_hex,
                         label: &label,
