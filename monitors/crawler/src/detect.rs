@@ -8,6 +8,13 @@ const DEFAULT_SILENCE_SECS: u64 = 120;
 const DEFAULT_MULTI_SILENCE_THRESHOLD: usize = 3;
 const DEFAULT_STALL_SECS: u64 = 15;
 const DEFAULT_WARMUP_SECS: u64 = 30;
+/// Rolling window (in ledgers) over which sustained minority-branch validation
+/// is measured for mini-fork / partition detection.
+const MINI_FORK_WINDOW: u64 = 64;
+/// A validator on a minority branch for at least this many of the last
+/// MINI_FORK_WINDOW ledgers is persistently diverging (honest validators agree
+/// ~100% of the time), so a stable set of these is a partition signal.
+const MINI_FORK_MIN: usize = 8;
 
 fn ts() -> String {
     chrono::Utc::now().format("%H:%M:%S").to_string()
@@ -31,6 +38,7 @@ struct LedgerWindow {
     all_validators: HashSet<String>,
     unl_validators: HashSet<String>,
     finalized: bool,
+    equivocators: HashSet<String>,
 }
 
 pub struct DetectionEngine {
@@ -41,6 +49,11 @@ pub struct DetectionEngine {
     finalized_order: VecDeque<u64>,
 
     validator_last_seen: HashMap<String, Instant>,
+
+    // Per-validator record of recent finalized ledgers where they validated a
+    // minority (non-agreed) hash — the basis for mini-fork / partition detection.
+    minority_divergence: HashMap<String, VecDeque<u64>>,
+    mini_fork_active: bool,
 
     highest_seq: u64,
     last_seq_advance: Instant,
@@ -81,6 +94,8 @@ impl DetectionEngine {
             ledgers: HashMap::new(),
             finalized_order: VecDeque::new(),
             validator_last_seen: HashMap::new(),
+            minority_divergence: HashMap::new(),
+            mini_fork_active: false,
             highest_seq: 0,
             last_seq_advance: now,
             chain_stalled: false,
@@ -184,9 +199,36 @@ impl DetectionEngine {
             all_validators: HashSet::new(),
             unl_validators: HashSet::new(),
             finalized: false,
+            equivocators: HashSet::new(),
         });
 
         if !window.finalized {
+            // EQUIVOCATION: this validator already signed a DIFFERENT hash for the
+            // same ledger sequence. Unambiguous Byzantine behavior — page. (Zero
+            // false-positive tolerance per the monitoring spec §5.)
+            let already_other = window
+                .hashes
+                .iter()
+                .any(|(h, vs)| h != ledger_hash && vs.contains(&mk));
+            if already_other && window.equivocators.insert(mk.clone()) && warmed_up {
+                alerts.push(Alert {
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    severity: "CRITICAL",
+                    category: "EQUIVOCATION",
+                    message: format!(
+                        "Validator {} signed two different hashes for ledger {} — equivocation (Byzantine / key compromise)",
+                        &mk[..12.min(mk.len())],
+                        ledger_index
+                    ),
+                    ledger_seq: Some(ledger_index),
+                    details: serde_json::json!({
+                        "validator": mk,
+                        "ledger_index": ledger_index,
+                        "is_unl": is_unl,
+                    }),
+                });
+            }
+
             window.all_validators.insert(mk.clone());
             window
                 .hashes
@@ -284,6 +326,71 @@ impl DetectionEngine {
                             ledger_seq: Some(seq),
                             details: serde_json::json!({ "branches": fork_details }),
                         });
+                    }
+
+                    // Record which UNL validators sat on a MINORITY branch this
+                    // ledger (the plurality hash is "the chain"; anyone else diverged).
+                    let majority_hash = window
+                        .hashes
+                        .iter()
+                        .max_by_key(|(_, vs)| vs.iter().filter(|v| self.unl_keys.contains(*v)).count())
+                        .map(|(h, _)| h.clone());
+                    if let Some(maj) = majority_hash {
+                        for (hash, validators) in &window.hashes {
+                            if hash == &maj {
+                                continue;
+                            }
+                            for v in validators {
+                                if self.unl_keys.contains(v) {
+                                    self.minority_divergence
+                                        .entry(v.clone())
+                                        .or_default()
+                                        .push_back(seq);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // --- MINI-FORK: sustained per-validator disagreement ---
+                // A single-ledger split is timing noise; the SAME validators on a
+                // minority branch across many ledgers is a partitioned / private-
+                // peer cluster, even while the main network keeps quorum (scenario
+                // 06 / monitoring-signals §5).
+                if !self.unl_keys.is_empty() {
+                    let cutoff = seq.saturating_sub(MINI_FORK_WINDOW);
+                    let mut persistent: Vec<String> = Vec::new();
+                    for (v, dq) in self.minority_divergence.iter_mut() {
+                        while dq.front().is_some_and(|&s| s < cutoff) {
+                            dq.pop_front();
+                        }
+                        if dq.len() >= MINI_FORK_MIN {
+                            persistent.push(v.clone());
+                        }
+                    }
+                    if !persistent.is_empty() && !self.mini_fork_active {
+                        self.mini_fork_active = true;
+                        let quorum_gap = self.unl_keys.len().saturating_sub(self.min_validators);
+                        let severity = if persistent.len() >= quorum_gap {
+                            "CRITICAL"
+                        } else {
+                            "WARNING"
+                        };
+                        persistent.sort();
+                        alerts.push(Alert {
+                            ts: chrono::Utc::now().to_rfc3339(),
+                            severity,
+                            category: "MINI_FORK",
+                            message: format!(
+                                "{} validator(s) persistently validating a minority branch over the last {} ledgers — possible partition or private-peer cluster",
+                                persistent.len(),
+                                MINI_FORK_WINDOW
+                            ),
+                            ledger_seq: None,
+                            details: serde_json::json!({ "validators": persistent }),
+                        });
+                    } else if persistent.is_empty() {
+                        self.mini_fork_active = false;
                     }
                 }
 
@@ -449,4 +556,41 @@ pub fn load_unl_file(path: &str) -> HashSet<String> {
     }
     eprintln!("[{}] loaded {} UNL keys from {}", ts(), keys.len(), path);
     keys
+}
+
+#[cfg(test)]
+impl DetectionEngine {
+    fn force_warmup(&mut self) {
+        self.started_at = Instant::now() - std::time::Duration::from_secs(3600);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unl(keys: &[&str]) -> HashSet<String> {
+        keys.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn equivocation_flags_double_sign_once() {
+        let mut e = DetectionEngine::new(unl(&["VAL1"]), Some(1));
+        e.force_warmup();
+        e.process_validation(Some("VAL1"), "HASH_A", 100);
+        let a = e.process_validation(Some("VAL1"), "HASH_B", 100);
+        assert!(a.iter().any(|x| x.category == "EQUIVOCATION" && x.severity == "CRITICAL"));
+        // repeat of the same conflicting hash does not re-alert for this ledger
+        let again = e.process_validation(Some("VAL1"), "HASH_B", 100);
+        assert!(!again.iter().any(|x| x.category == "EQUIVOCATION"));
+    }
+
+    #[test]
+    fn honest_validators_do_not_equivocate() {
+        let mut e = DetectionEngine::new(unl(&["VAL1", "VAL2"]), Some(1));
+        e.force_warmup();
+        e.process_validation(Some("VAL1"), "HASH_A", 100);
+        let a = e.process_validation(Some("VAL2"), "HASH_A", 100);
+        assert!(!a.iter().any(|x| x.category == "EQUIVOCATION"));
+    }
 }

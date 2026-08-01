@@ -32,10 +32,12 @@ with 24h hysteresis (a persistent condition re-fires at most daily).
 
 | Alert | Severity | Fires when | Dedup |
 |-------|----------|-----------|-------|
-| `FORK_DETECTED` | WARNING/CRITICAL | Conflicting ledger hashes validated at the same sequence | per ledger, 24h |
+| `FORK_DETECTED` | CRITICAL | Conflicting ledger hashes where **no branch reached quorum** (a genuine split, not a lone straggler) | per ledger, 24h |
+| `MINI_FORK` | WARNING/CRITICAL | The same validators persistently validate a **minority branch** across many ledgers — a partitioned / private-peer cluster, even while the main network keeps quorum | per episode, 24h |
+| `EQUIVOCATION` | CRITICAL | A validator signed **two different hashes for the same ledger** — unambiguous Byzantine behavior / key compromise (zero-false-positive signal) | per (validator, ledger) |
 | `LOW_QUORUM` | WARNING/CRITICAL | Fewer validators than the expected minimum agreed a ledger | per ledger, 24h |
 | `CHAIN_STALL` | CRITICAL | No ledger progress for the stall window | per ledger, 24h |
-| `VALIDATORS_SILENT` | WARNING/CRITICAL | Multiple UNL validators stopped signing | per ledger, 24h |
+| `VALIDATORS_SILENT` | WARNING/CRITICAL | UNL validators missing to within 1 of losing quorum (not routine stragglers) | per gap, 24h |
 
 ## crawler `crawl` — topology snapshot (hourly, observatory VM)
 
