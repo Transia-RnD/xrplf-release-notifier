@@ -1,0 +1,25 @@
+[Unit]
+Description=vlwatch — passive XRPL overlay UNL-propagation monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=observatory
+EnvironmentFile=/etc/observatory.env
+# $MONITOR_FLAGS (from /etc/observatory.env) is either `--webhook <url>` (live)
+# or `--dry-run` (silent). systemd splits the unbraced $VAR into separate args.
+ExecStart=/opt/observatory/bin/vlwatch \
+  $MONITOR_FLAGS \
+  --state-file /var/lib/observatory/vlwatch-state.json \
+  --publishers /opt/observatory/publishers.txt
+Restart=always
+RestartSec=10
+StateDirectory=observatory
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/observatory
+
+[Install]
+WantedBy=multi-user.target

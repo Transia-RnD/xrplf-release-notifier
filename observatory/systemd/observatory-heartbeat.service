@@ -1,0 +1,9 @@
+[Unit]
+Description=Publish observatory heartbeat (unit health) to GCS
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=observatory
+EnvironmentFile=/etc/observatory.env
+ExecStart=/opt/observatory/heartbeat.sh

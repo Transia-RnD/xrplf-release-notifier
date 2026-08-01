@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars and fill in.
+project = "your-gcp-project-id"
+region  = "us-central1"
+zone    = "us-central1-a"
+
+# Tighten to your admin IP(s) before apply.
+ssh_source_ranges = ["0.0.0.0/0"]
+
+# ssh_pubkey_path = "~/.ssh/xrpl-labs.pub"
+# state_bucket    = "xrplf-release-notifier"

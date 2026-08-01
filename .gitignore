@@ -7,3 +7,8 @@ dist/
 coverage/
 .DS_Store
 tasks
+/monitors/target
+
+observatory/terraform/.terraform/
+observatory/terraform/*.tfstate*
+observatory/terraform/terraform.tfvars
