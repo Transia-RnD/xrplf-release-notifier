@@ -26,7 +26,9 @@ echo "==> ensuring toolchain on $HOST (rustup, build deps, gcloud)"
   sudo install -d -o observatory -g observatory /opt/observatory /var/lib/observatory
   export DEBIAN_FRONTEND=noninteractive
   sudo apt-get update -qq
-  sudo apt-get install -y -qq build-essential pkg-config perl make git rsync curl google-cloud-cli
+  sudo apt-get install -y -qq build-essential pkg-config perl make git rsync curl
+  # gcloud (for the heartbeat) is not in the base apt repos — use snap, best-effort.
+  command -v gcloud >/dev/null || sudo snap install google-cloud-cli --classic || echo "WARN: gcloud not installed — heartbeat will be skipped"
   sudo -u observatory bash -lc "command -v cargo >/dev/null || (curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y)"'
 
 # Optional GCS credential for the heartbeat (required off-GCP).
@@ -75,9 +77,9 @@ echo "==> installing systemd units"
 rsync -az -e "$RSYNC_RSH" "$HERE/systemd/" "$HOST:/tmp/observatory-units/"
 "${SSH[@]}" 'sudo cp /tmp/observatory-units/*.service /tmp/observatory-units/*.timer /etc/systemd/system/ && \
   sudo systemctl daemon-reload && \
-  sudo systemctl enable --now vlwatch.service crawler-monitor.service crawler-crawl.timer crawler-amendments.timer observatory-heartbeat.timer && \
+  sudo systemctl enable --now vlwatch.service crawler-monitor.service crawler-crawl.timer crawler-amendments.timer crawler-nunl.timer observatory-heartbeat.timer && \
   sudo systemctl restart vlwatch.service crawler-monitor.service'
 
 echo "==> status"
-"${SSH[@]}" 'systemctl --no-pager --lines=0 status vlwatch.service crawler-monitor.service crawler-crawl.timer crawler-amendments.timer observatory-heartbeat.timer | grep -E "●|Active:"'
+"${SSH[@]}" 'systemctl --no-pager --lines=0 status vlwatch.service crawler-monitor.service crawler-crawl.timer crawler-amendments.timer crawler-nunl.timer observatory-heartbeat.timer | grep -E "●|Active:"'
 echo "deploy complete."

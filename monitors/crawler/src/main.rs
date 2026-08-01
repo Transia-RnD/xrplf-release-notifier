@@ -2,8 +2,10 @@ mod amendments;
 mod crawl;
 mod detect;
 mod monitor;
+mod nunl;
 mod report;
 mod types;
+mod version;
 mod webhook;
 
 use anyhow::Result;
@@ -101,6 +103,10 @@ enum Command {
         /// Emit alerts to stdout without posting
         #[arg(long)]
         dry_run: bool,
+
+        /// Alert when validators run a build below this version (e.g. a hotfix "3.2.1")
+        #[arg(long)]
+        min_version: Option<String>,
     },
     /// Track network-wide amendment majority/activation via public ledger_entry
     Amendments {
@@ -110,6 +116,28 @@ enum Command {
 
         /// State file (previous enabled/majority sets)
         #[arg(short, long, default_value = "amendments-state.json")]
+        state_file: String,
+
+        /// Mattermost webhook URL for alerts
+        #[arg(long)]
+        webhook: Option<String>,
+
+        /// Alert dedup state file (24h hysteresis)
+        #[arg(long)]
+        webhook_state: Option<String>,
+
+        /// Evaluate and print alerts without posting
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Track the Negative UNL (validators disabled/re-enabled) via public ledger_entry
+    Nunl {
+        /// Public JSON-RPC endpoint (http)
+        #[arg(short, long, default_value = "https://s1.ripple.com:51234")]
+        endpoint: String,
+
+        /// State file (previous NUNL membership)
+        #[arg(short, long, default_value = "nunl-state.json")]
         state_file: String,
 
         /// Mattermost webhook URL for alerts
@@ -177,6 +205,7 @@ async fn main() -> Result<()> {
             webhook,
             webhook_state,
             dry_run,
+            min_version,
         } => {
             monitor::run(
                 endpoints,
@@ -189,6 +218,7 @@ async fn main() -> Result<()> {
                 webhook,
                 webhook_state,
                 dry_run,
+                min_version,
             )
             .await
         }
@@ -199,6 +229,13 @@ async fn main() -> Result<()> {
             webhook_state,
             dry_run,
         } => amendments::run(&endpoint, &state_file, webhook, webhook_state, dry_run).await,
+        Command::Nunl {
+            endpoint,
+            state_file,
+            webhook,
+            webhook_state,
+            dry_run,
+        } => nunl::run(&endpoint, &state_file, webhook, webhook_state, dry_run).await,
         Command::GenConfig {
             state_file,
             max_peers,

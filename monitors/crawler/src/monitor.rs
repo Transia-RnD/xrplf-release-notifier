@@ -1,7 +1,9 @@
 use base64 as base64_engine;
 use crate::detect::{self, DetectionEngine, Alert};
 use crate::types::CrawlState;
+use crate::version::{self, Version};
 use crate::webhook::AlertSink;
+use std::collections::HashMap;
 use anyhow::{anyhow, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -54,6 +56,7 @@ struct Validation {
     ledger_index: String,
     full: bool,
     source: String,
+    server_version: Option<String>,
 }
 
 fn base64_pubkey_to_base58(b64: &str) -> Option<String> {
@@ -135,6 +138,7 @@ async fn stream_validations(
                         ledger_index: v.ledger_index.unwrap_or_default(),
                         full: v.full.unwrap_or(false),
                         source: url.to_string(),
+                        server_version: v.server_version,
                     });
                 }
             }
@@ -190,9 +194,15 @@ pub async fn run(
     webhook: Option<String>,
     webhook_state: Option<String>,
     dry_run: bool,
+    min_version: Option<String>,
 ) -> Result<()> {
     let mut sink = AlertSink::new(webhook, dry_run, webhook_state, "xrpl-crawler/monitor");
     let suspicious = load_suspicious_pubkeys(state_file);
+    // Post-hotfix upgrade adoption: decode each validator's server_version and
+    // alert when validators lag below --min-version.
+    let min_ver = min_version.as_deref().and_then(version::parse_min);
+    let mut validator_versions: HashMap<String, Version> = HashMap::new();
+    let mut last_adoption = std::time::Instant::now();
 
     let unl_keys = match unl_file {
         Some(path) => detect::load_unl_file(path),
@@ -307,6 +317,37 @@ pub async fn run(
                     source: &v.source,
                 };
                 let _ = writeln!(file, "{}", serde_json::to_string(&entry).unwrap_or_default());
+
+                // Track this validator's decoded software version (key by master
+                // key when present, else the ephemeral validation key).
+                if min_ver.is_some() {
+                    if let Some(dec) = v
+                        .server_version
+                        .as_deref()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .and_then(version::decode)
+                    {
+                        let key = v.master_key.clone().unwrap_or_else(|| v.pk.clone());
+                        validator_versions.insert(key, dec);
+                    }
+                    // Evaluate adoption at most every 5 minutes.
+                    if last_adoption.elapsed() >= Duration::from_secs(300) {
+                        last_adoption = std::time::Instant::now();
+                        if let Some(min) = min_ver {
+                            if let Some(alert) = version::evaluate_adoption(&validator_versions, min) {
+                                sink.send(
+                                    alert.severity,
+                                    &alert.category,
+                                    "adoption",
+                                    &alert.title,
+                                    &alert.text,
+                                    alert.fields.clone(),
+                                    chrono::Utc::now().timestamp(),
+                                );
+                            }
+                        }
+                    }
+                }
 
                 // Feed into detection engine (skip other networks)
                 let seq: u64 = v.ledger_index.parse().unwrap_or(0);

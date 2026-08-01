@@ -64,6 +64,29 @@ enabled + majority sets. Cold start (no prior state) seeds silently.
 | `AMENDMENT_ENABLED` | INFO | An amendment activates on the network | per amendment, 24h |
 | `AMENDMENT_LOST_MAJORITY` | WARNING | An amendment falls below majority before activating | per amendment, 24h |
 
+## crawler `nunl` — Negative UNL tracking (periodic, observatory VM)
+
+Polls the on-ledger NegativeUNL object and diffs the disabled/pending sets.
+
+| Alert | Severity | Fires when | Dedup |
+|-------|----------|-----------|-------|
+| `NUNL_DISABLED` | WARNING | A validator is added to the Negative UNL (unreliable/offline) | per validator, 24h |
+| `NUNL_REENABLED` | INFO | A validator recovers and leaves the Negative UNL | per validator, 24h |
+| `NUNL_PENDING_DISABLE` | WARNING | A validator is scheduled to be disabled at the next flag ledger | per validator, 24h |
+| `NUNL_PENDING_REENABLE` | INFO | A validator is scheduled to be re-enabled at the next flag ledger | per validator, 24h |
+
+## crawler `monitor --min-version` — validator upgrade adoption (post-hotfix)
+
+| Alert | Severity | Fires when | Dedup |
+|-------|----------|-----------|-------|
+| `VALIDATOR_VERSION_LAG` | WARNING / CRITICAL (≥34% lag) | Validators run a build below `--min-version` (a hotfix), decoded from `server_version` in validations | 24h |
+
+**Caveat:** `server_version` is not reliably present on the *public* validations
+stream (observed ~0% coverage on s1/s2). This alert only produces signal when
+`monitor` is pointed at an endpoint that relays it (e.g. the stage node's admin
+WS). The decoder (rippled `BuildInfo` layout) and rule are unit-tested; with no
+version data it simply no-ops.
+
 ## notifier watchdog — external vantage (Cloud Run, every 15 min) — planned
 
 The one thing the monitors can't self-report: whether they and the stage node
