@@ -206,8 +206,10 @@ mod tests {
     #[test]
     fn pending_disable_alerts_on_change() {
         let prev = NunlState::default();
-        let mut fresh = NunlState::default();
-        fresh.to_disable = Some("EDCCC".into());
+        let fresh = NunlState {
+            to_disable: Some("EDCCC".into()),
+            ..Default::default()
+        };
         let a = diff(&prev, &fresh, false);
         assert!(a.iter().any(|x| x.category == "NUNL_PENDING_DISABLE"));
     }
