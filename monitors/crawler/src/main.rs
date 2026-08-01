@@ -1,3 +1,4 @@
+mod amendments;
 mod crawl;
 mod detect;
 mod monitor;
@@ -101,6 +102,28 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Track network-wide amendment majority/activation via public ledger_entry
+    Amendments {
+        /// Public JSON-RPC endpoint (http)
+        #[arg(short, long, default_value = "https://s1.ripple.com:51234")]
+        endpoint: String,
+
+        /// State file (previous enabled/majority sets)
+        #[arg(short, long, default_value = "amendments-state.json")]
+        state_file: String,
+
+        /// Mattermost webhook URL for alerts
+        #[arg(long)]
+        webhook: Option<String>,
+
+        /// Alert dedup state file (24h hysteresis)
+        #[arg(long)]
+        webhook_state: Option<String>,
+
+        /// Evaluate and print alerts without posting
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Generate xrpld [ips_fixed] config from crawl results
     GenConfig {
         /// Crawl state file
@@ -169,6 +192,13 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Command::Amendments {
+            endpoint,
+            state_file,
+            webhook,
+            webhook_state,
+            dry_run,
+        } => amendments::run(&endpoint, &state_file, webhook, webhook_state, dry_run).await,
         Command::GenConfig {
             state_file,
             max_peers,

@@ -1,0 +1,15 @@
+[Unit]
+Description=xrpl-crawler amendments — network-wide amendment majority/activation tracking
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=observatory
+EnvironmentFile=/etc/observatory.env
+ExecStart=/opt/observatory/bin/xrpl-crawler amendments \
+  --endpoint https://s1.ripple.com:51234 \
+  --state-file /var/lib/observatory/amendments-state.json \
+  --webhook ${MATTERMOST_WEBHOOK_URL} \
+  --webhook-state /var/lib/observatory/amendments-alert-state.json
+StateDirectory=observatory

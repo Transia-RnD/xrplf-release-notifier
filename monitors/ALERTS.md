@@ -53,6 +53,17 @@ Ad-hoc: `scripts/attack-report.py` turns a crawl `--report-json` into a
 manifest-flood **patch-adoption** post (patched ≥3.2.1 vs vulnerable). One-shot
 situational tool; fold into a recurring crawl alert if we want it standing.
 
+## crawler `amendments` — on-ledger amendment tracking (periodic, observatory VM)
+
+Polls a public node's `ledger_entry` for the Amendments object and diffs the
+enabled + majority sets. Cold start (no prior state) seeds silently.
+
+| Alert | Severity | Fires when | Dedup |
+|-------|----------|-----------|-------|
+| `AMENDMENT_MAJORITY` | WARNING | An amendment reaches majority (activation ~2 weeks out) | per amendment, 24h |
+| `AMENDMENT_ENABLED` | INFO | An amendment activates on the network | per amendment, 24h |
+| `AMENDMENT_LOST_MAJORITY` | WARNING | An amendment falls below majority before activating | per amendment, 24h |
+
 ## notifier watchdog — external vantage (Cloud Run, every 15 min) — planned
 
 The one thing the monitors can't self-report: whether they and the stage node

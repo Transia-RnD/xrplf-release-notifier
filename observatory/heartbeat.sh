@@ -4,7 +4,7 @@
 set -euo pipefail
 
 BUCKET="${OBSERVATORY_STATE_BUCKET:-xrplf-release-notifier}"
-UNITS=(vlwatch.service crawler-monitor.service crawler-crawl.timer)
+UNITS=(vlwatch.service crawler-monitor.service crawler-crawl.timer crawler-amendments.timer)
 
 status_json=""
 for u in "${UNITS[@]}"; do
