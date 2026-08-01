@@ -155,6 +155,9 @@ impl Notifier {
 pub fn post_json(url: &str, body: &str) -> Result<(), String> {
     match ureq::post(url)
         .set("Content-Type", "application/json")
+        // The Mattermost host sits behind a WAF that 403s default client
+        // user-agents (e.g. ureq/*); send a descriptive one.
+        .set("User-Agent", "xrplf-release-notifier/monitors")
         .send_string(body)
     {
         Ok(_) => Ok(()),

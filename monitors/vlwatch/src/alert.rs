@@ -21,6 +21,11 @@ pub const EXPIRY_CRIT_DAYS: i64 = 7;
 pub const NO_DATA_SECS: i64 = 1800;
 /// An allowlisted publisher unseen for this long → PUBLISHER_MISSING.
 pub const PUBLISHER_MISSING_SECS: i64 = 3600;
+/// Peers must disagree on a publisher's sequence for this long → UNL_DIVERGENCE
+/// (normal relay lag is seconds; a sustained gap means a split or stuck hub).
+pub const DIVERGENCE_GRACE_SECS: i64 = 600;
+/// Only peers that reported within this window count toward divergence.
+pub const DIVERGENCE_PEER_FRESH_SECS: i64 = 300;
 
 const MAX_NOTIFIED: usize = 64;
 
@@ -284,6 +289,80 @@ pub fn evaluate_periodic(
     alerts
 }
 
+/// Tracks which sequence each peer advertises per publisher, to detect a
+/// sustained cross-peer disagreement (relay split / stuck hub). In-memory only;
+/// divergence is a live condition, not something to persist across restarts.
+#[derive(Default)]
+pub struct DivergenceTracker {
+    peers: HashMap<String, HashMap<String, (u64, i64)>>,
+    labels: HashMap<String, String>,
+    divergent_since: HashMap<String, i64>,
+    alerted: std::collections::HashSet<String>,
+}
+
+impl DivergenceTracker {
+    pub fn observe(&mut self, publisher: &str, label: &str, peer: &str, seq: u64, now: i64) {
+        self.labels.insert(publisher.to_string(), label.to_string());
+        let by_peer = self.peers.entry(publisher.to_string()).or_default();
+        let e = by_peer.entry(peer.to_string()).or_insert((0, 0));
+        if seq >= e.0 {
+            *e = (seq, now);
+        } else {
+            e.1 = now; // peer still active, just relaying an older seq
+        }
+    }
+
+    fn label(&self, publisher: &str) -> String {
+        self.labels.get(publisher).cloned().unwrap_or_else(|| publisher.to_string())
+    }
+
+    /// Emit UNL_DIVERGENCE for publishers where ≥2 fresh peers have disagreed on
+    /// the sequence for longer than the grace window. Clears on recovery.
+    pub fn evaluate(&mut self, now: i64) -> Vec<Alert> {
+        let mut alerts = Vec::new();
+        let publishers: Vec<String> = self.peers.keys().cloned().collect();
+        for publisher in publishers {
+            let fresh: Vec<u64> = self.peers[&publisher]
+                .values()
+                .filter(|(_, ts)| now - *ts <= DIVERGENCE_PEER_FRESH_SECS)
+                .map(|(seq, _)| *seq)
+                .collect();
+            let diverging = fresh.len() >= 2
+                && fresh.iter().max().copied().unwrap_or(0)
+                    > fresh.iter().min().copied().unwrap_or(0);
+            if diverging {
+                let since = *self.divergent_since.entry(publisher.clone()).or_insert(now);
+                if now - since >= DIVERGENCE_GRACE_SECS && !self.alerted.contains(&publisher) {
+                    self.alerted.insert(publisher.clone());
+                    let (lo, hi) = (
+                        fresh.iter().min().copied().unwrap_or(0),
+                        fresh.iter().max().copied().unwrap_or(0),
+                    );
+                    let label = self.label(&publisher);
+                    alerts.push(
+                        Alert::new(
+                            Severity::Warning,
+                            "UNL_DIVERGENCE",
+                            format!("Peers disagree on {label} sequence"),
+                            format!(
+                                "Hubs have advertised different current sequences ({lo}..{hi}) for over {} minutes — possible relay split or stuck hub.",
+                                DIVERGENCE_GRACE_SECS / 60
+                            ),
+                        )
+                        .field("publisher", label)
+                        .field("seq_low", lo.to_string())
+                        .field("seq_high", hi.to_string()),
+                    );
+                }
+            } else {
+                self.divergent_since.remove(&publisher);
+                self.alerted.remove(&publisher);
+            }
+        }
+        alerts
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,6 +453,27 @@ mod tests {
         evaluate(&obs(20, true, true, None), &mut st, &allow(), true, NOW);
         let a = evaluate(&obs(19, true, true, None), &mut st, &allow(), false, NOW);
         assert!(a.iter().any(|x| x.category == "SEQ_REGRESSION"));
+    }
+
+    #[test]
+    fn divergence_fires_after_grace_and_recovers() {
+        let mut t = DivergenceTracker::default();
+        let t0 = NOW;
+        // two peers disagree; first detection starts the grace clock here.
+        t.observe("KEYA", "vl.example.org", "hubA", 100, t0);
+        t.observe("KEYA", "vl.example.org", "hubB", 99, t0);
+        assert!(t.evaluate(t0 + 60).is_empty()); // grace starts at t0+60
+        // still disagreeing past grace (peers refreshed so they stay fresh)
+        let fire_at = t0 + 60 + DIVERGENCE_GRACE_SECS;
+        t.observe("KEYA", "vl.example.org", "hubA", 100, fire_at - 10);
+        t.observe("KEYA", "vl.example.org", "hubB", 99, fire_at - 10);
+        let a = t.evaluate(fire_at + 1);
+        assert!(a.iter().any(|x| x.category == "UNL_DIVERGENCE"));
+        // does not re-fire while still diverging
+        assert!(t.evaluate(fire_at + 2).is_empty());
+        // recovery: laggard catches up → clears
+        t.observe("KEYA", "vl.example.org", "hubB", 100, fire_at + 3);
+        assert!(t.evaluate(fire_at + 4).is_empty());
     }
 
     #[test]

@@ -10,7 +10,7 @@ mod peer;
 mod proto;
 mod vl;
 
-use alert::{PeriodicFired, VlObservation, VlState};
+use alert::{DivergenceTracker, PeriodicFired, VlObservation, VlState};
 use monitor_common::{state as cstate, Notifier};
 use peer::{Event, Identity};
 use std::collections::HashMap;
@@ -186,6 +186,7 @@ fn main() {
         eprintln!("vlwatch: cold start — suppressing delta alerts, seeding state");
     }
     let mut periodic = PeriodicFired::default();
+    let mut divergence = DivergenceTracker::default();
     let mut connected = false;
     let mut last_vl_unix: Option<i64> = None;
     let started_unix = now_unix();
@@ -235,6 +236,10 @@ fn main() {
                 &mut periodic,
             );
             if let Err(e) = notifier.send(&alerts) {
+                eprintln!("vlwatch: notify failed: {e}");
+            }
+            let div = divergence.evaluate(now_unix());
+            if let Err(e) = notifier.send(&div) {
                 eprintln!("vlwatch: notify failed: {e}");
             }
         }
@@ -294,6 +299,7 @@ fn main() {
                     };
                     let alerts =
                         alert::evaluate(&obs, &mut vl_state, &allowlist, cold_start, now_unix());
+                    divergence.observe(&rec.publisher_hex, &label, &peer, rec.sequence, now_unix());
                     if let Err(e) = notifier.send(&alerts) {
                         eprintln!("vlwatch: notify failed: {e}");
                     }

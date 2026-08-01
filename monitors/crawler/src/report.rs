@@ -17,6 +17,9 @@ pub const ECLIPSE_MEDIUM_THRESHOLD: usize = 3;
 pub const COLLAPSE_FLOOR: usize = 100;
 /// Node count under this fraction of the previous crawl → TOPOLOGY_COLLAPSE.
 pub const COLLAPSE_RATIO_PCT: usize = 60;
+/// A version new since the last crawl needs at least this many nodes to report
+/// (filters one-off dev/test builds from a genuine release rollout).
+pub const NEW_VERSION_MIN_NODES: usize = 10;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Report {
@@ -167,6 +170,29 @@ pub fn evaluate(report: &Report, prev: Option<&Report>) -> Vec<RuleAlert> {
     }
 
     if let Some(prev) = prev {
+        // NEW_VERSION — a version absent (or negligible) last crawl now on a
+        // meaningful share of nodes: a release rolling out across the network.
+        for (ver, &count) in &report.versions {
+            if ver == "unknown" || count < NEW_VERSION_MIN_NODES {
+                continue;
+            }
+            if prev.versions.get(ver).copied().unwrap_or(0) == 0 {
+                let pct = report.nodes.max(1);
+                out.push(RuleAlert {
+                    severity: Severity::Info,
+                    category: "NEW_VERSION",
+                    key: ver.clone(),
+                    title: format!("New node version on the network: {ver}"),
+                    text: format!("{count} nodes are now running {ver} (not seen in the previous crawl)."),
+                    fields: vec![
+                        ("version".into(), ver.clone()),
+                        ("nodes".into(), count.to_string()),
+                        ("share".into(), format!("{}%", count * 100 / pct)),
+                    ],
+                });
+            }
+        }
+
         if prev.nodes >= COLLAPSE_FLOOR && report.nodes * 100 < prev.nodes * COLLAPSE_RATIO_PCT {
             out.push(RuleAlert {
                 severity: Severity::Warning,
@@ -216,6 +242,23 @@ mod tests {
     fn eclipse_high_is_critical() {
         let a = evaluate(&rpt(900, 0, 1, 0), None);
         assert!(a.iter().any(|x| x.category == "ECLIPSE_RISK" && x.severity == Severity::Critical));
+    }
+
+    #[test]
+    fn new_version_reports_only_meaningful_rollout() {
+        let mut now = rpt(900, 0, 0, 0);
+        now.versions = HashMap::from([
+            ("xrpld-3.3.0".into(), 40), // new, meaningful
+            ("xrpld-3.2.0".into(), 800),
+            ("dev-build".into(), 2), // new but below min
+        ]);
+        let mut prev = rpt(900, 0, 0, 0);
+        prev.versions = HashMap::from([("xrpld-3.2.0".into(), 840)]);
+        let a = evaluate(&now, Some(&prev));
+        let new_versions: Vec<_> = a.iter().filter(|x| x.category == "NEW_VERSION").map(|x| x.key.as_str()).collect();
+        assert_eq!(new_versions, vec!["xrpld-3.3.0"]);
+        // no prev → no NEW_VERSION (cold)
+        assert!(!evaluate(&now, None).iter().any(|x| x.category == "NEW_VERSION"));
     }
 
     #[test]
