@@ -195,6 +195,7 @@ pub async fn run(
     webhook_state: Option<String>,
     dry_run: bool,
     min_version: Option<String>,
+    names_file: Option<String>,
 ) -> Result<()> {
     let mut sink = AlertSink::new(webhook, dry_run, webhook_state, "xrpl-crawler/monitor");
     let suspicious = load_suspicious_pubkeys(state_file);
@@ -209,6 +210,11 @@ pub async fn run(
         None => HashSet::new(),
     };
     let mut engine = DetectionEngine::new(unl_keys, min_validators);
+    if let Some(nf) = names_file.as_deref() {
+        let names = detect::load_names(nf);
+        eprintln!("[{}] loaded {} validator names", ts(), names.len());
+        engine.set_names(names);
+    }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Validation>();
     let running = Arc::new(AtomicBool::new(true));

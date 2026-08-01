@@ -20,6 +20,20 @@ fn ts() -> String {
     chrono::Utc::now().format("%H:%M:%S").to_string()
 }
 
+/// Human label for a validator key: its name if known, else a short key.
+/// A free function so it borrows only the names map, not all of `self` — callers
+/// use it while a `LedgerWindow` (a different field) is mutably borrowed.
+fn label(names: &HashMap<String, String>, key: &str) -> String {
+    match names.get(key) {
+        Some(name) => name.clone(),
+        None => format!("{}…", &key[..12.min(key.len())]),
+    }
+}
+
+fn labels(names: &HashMap<String, String>, keys: &[String]) -> Vec<String> {
+    keys.iter().map(|k| label(names, k)).collect()
+}
+
 #[derive(Debug, Serialize)]
 pub struct Alert {
     pub ts: String,
@@ -43,6 +57,7 @@ struct LedgerWindow {
 
 pub struct DetectionEngine {
     unl_keys: HashSet<String>,
+    names: HashMap<String, String>,
     min_validators: usize,
 
     ledgers: HashMap<u64, LedgerWindow>,
@@ -90,6 +105,7 @@ impl DetectionEngine {
         let now = Instant::now();
         Self {
             unl_keys,
+            names: HashMap::new(),
             min_validators: min,
             ledgers: HashMap::new(),
             finalized_order: VecDeque::new(),
@@ -109,6 +125,12 @@ impl DetectionEngine {
             stall_secs: DEFAULT_STALL_SECS,
             warmup_secs: DEFAULT_WARMUP_SECS,
         }
+    }
+
+    /// Attach a validator key → human name map (e.g. `nH… → "anodos.finance"`)
+    /// so alerts identify who a validator is, not just its key.
+    pub fn set_names(&mut self, names: HashMap<String, String>) {
+        self.names = names;
     }
 
     pub fn process_validation(
@@ -217,12 +239,13 @@ impl DetectionEngine {
                     category: "EQUIVOCATION",
                     message: format!(
                         "Validator {} signed two different hashes for ledger {} — equivocation (Byzantine / key compromise)",
-                        &mk[..12.min(mk.len())],
+                        label(&self.names, &mk),
                         ledger_index
                     ),
                     ledger_seq: Some(ledger_index),
                     details: serde_json::json!({
-                        "validator": mk,
+                        "validator": label(&self.names, &mk),
+                        "validator_key": mk,
                         "ledger_index": ledger_index,
                         "is_unl": is_unl,
                     }),
@@ -377,17 +400,19 @@ impl DetectionEngine {
                             "WARNING"
                         };
                         persistent.sort();
+                        let named = labels(&self.names, &persistent);
                         alerts.push(Alert {
                             ts: chrono::Utc::now().to_rfc3339(),
                             severity,
                             category: "MINI_FORK",
                             message: format!(
-                                "{} validator(s) persistently validating a minority branch over the last {} ledgers — possible partition or private-peer cluster",
+                                "{} validator(s) persistently on a minority branch over the last {} ledgers ({}) — possible partition or private-peer cluster",
                                 persistent.len(),
-                                MINI_FORK_WINDOW
+                                MINI_FORK_WINDOW,
+                                named.join(", ")
                             ),
                             ledger_seq: None,
-                            details: serde_json::json!({ "validators": persistent }),
+                            details: serde_json::json!({ "validators": named, "validator_keys": persistent }),
                         });
                     } else if persistent.is_empty() {
                         self.mini_fork_active = false;
@@ -398,10 +423,11 @@ impl DetectionEngine {
                 if !self.unl_keys.is_empty() {
                     let unl_count = window.unl_validators.len();
                     if unl_count < self.min_validators {
-                        let missing: Vec<&String> = self
+                        let missing: Vec<String> = self
                             .unl_keys
                             .iter()
                             .filter(|k| !window.unl_validators.contains(*k))
+                            .cloned()
                             .collect();
 
                         let severity = if unl_count < self.min_validators / 2 {
@@ -427,7 +453,7 @@ impl DetectionEngine {
                                 "unl_count": unl_count,
                                 "unl_size": self.unl_keys.len(),
                                 "min_required": self.min_validators,
-                                "missing_validators": missing,
+                                "missing_validators": labels(&self.names, &missing),
                             }),
                         });
                     }
@@ -501,8 +527,8 @@ impl DetectionEngine {
                 ),
                 ledger_seq: None,
                 details: serde_json::json!({
-                    "silent_validators": silent,
-                    "never_seen_validators": never_seen,
+                    "silent_validators": labels(&self.names, &silent),
+                    "never_seen_validators": labels(&self.names, &never_seen),
                     "total_missing": total_missing,
                     "can_still_reach_quorum": !quorum_lost,
                 }),
@@ -535,6 +561,14 @@ impl DetectionEngine {
             active_unl,
             self.unl_keys.len(),
         )
+    }
+}
+
+/// Load a validator key → name map (JSON object). Missing/invalid → empty.
+pub fn load_names(path: &str) -> HashMap<String, String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Err(_) => HashMap::new(),
     }
 }
 

@@ -8,6 +8,36 @@
 use crate::webhook::AlertSink;
 use monitor_common::{state as cstate, Severity};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+
+/// Encode a validator master public key (hex) as its `nH…` node-public string,
+/// so a NegativeUNL PublicKey can be matched against the key→name map.
+fn hex_to_node_public(hex: &str) -> Option<String> {
+    let raw = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    if raw.len() != 33 {
+        return None;
+    }
+    let mut payload = Vec::with_capacity(38);
+    payload.push(28u8); // node-public prefix
+    payload.extend_from_slice(&raw);
+    let checksum = Sha256::digest(Sha256::digest(&payload));
+    payload.extend_from_slice(&checksum[..4]);
+    Some(
+        bs58::encode(&payload)
+            .with_alphabet(bs58::Alphabet::RIPPLE)
+            .into_string(),
+    )
+}
+
+fn name_of(names: &HashMap<String, String>, hex_key: &str) -> String {
+    hex_to_node_public(hex_key)
+        .and_then(|nh| names.get(&nh).cloned())
+        .unwrap_or_else(|| short(hex_key).to_string())
+}
 
 /// Well-known ledger index of the NegativeUNL singleton (sha512half(uint16('N'))).
 pub const NEGATIVE_UNL_INDEX: &str =
@@ -41,7 +71,12 @@ fn short(k: &str) -> &str {
 
 /// Diff `fresh` against `prev`. `cold` suppresses membership announcements on the
 /// first poll (but a genuinely empty NUNL producing no alerts is also fine).
-pub fn diff(prev: &NunlState, fresh: &NunlState, cold: bool) -> Vec<NunlAlert> {
+pub fn diff(
+    prev: &NunlState,
+    fresh: &NunlState,
+    cold: bool,
+    names: &HashMap<String, String>,
+) -> Vec<NunlAlert> {
     if cold && !prev.is_seeded() {
         return Vec::new();
     }
@@ -49,49 +84,53 @@ pub fn diff(prev: &NunlState, fresh: &NunlState, cold: bool) -> Vec<NunlAlert> {
 
     for v in &fresh.disabled {
         if !prev.disabled.contains(v) {
+            let n = name_of(names, v);
             alerts.push(NunlAlert {
                 severity: Severity::Warning,
                 category: "NUNL_DISABLED",
                 key: v.clone(),
-                title: format!("Validator {} added to Negative UNL", short(v)),
-                text: format!("Validator `{v}` was disabled (unreliable/offline) and removed from quorum."),
-                fields: vec![("validator".into(), v.clone())],
+                title: format!("Validator {n} added to Negative UNL"),
+                text: format!("{n} (`{v}`) was disabled (unreliable/offline) and removed from quorum."),
+                fields: vec![("validator".into(), n)],
             });
         }
     }
     for v in &prev.disabled {
         if !fresh.disabled.contains(v) {
+            let n = name_of(names, v);
             alerts.push(NunlAlert {
                 severity: Severity::Info,
                 category: "NUNL_REENABLED",
                 key: v.clone(),
-                title: format!("Validator {} re-enabled", short(v)),
-                text: format!("Validator `{v}` recovered and was removed from the Negative UNL."),
-                fields: vec![("validator".into(), v.clone())],
+                title: format!("Validator {n} re-enabled"),
+                text: format!("{n} (`{v}`) recovered and was removed from the Negative UNL."),
+                fields: vec![("validator".into(), n)],
             });
         }
     }
     if fresh.to_disable != prev.to_disable {
         if let Some(v) = &fresh.to_disable {
+            let n = name_of(names, v);
             alerts.push(NunlAlert {
                 severity: Severity::Warning,
                 category: "NUNL_PENDING_DISABLE",
                 key: v.clone(),
-                title: format!("Validator {} pending disable", short(v)),
-                text: format!("Validator `{v}` is scheduled to be added to the Negative UNL at the next flag ledger."),
-                fields: vec![("validator".into(), v.clone())],
+                title: format!("Validator {n} pending disable"),
+                text: format!("{n} (`{v}`) is scheduled to be added to the Negative UNL at the next flag ledger."),
+                fields: vec![("validator".into(), n)],
             });
         }
     }
     if fresh.to_reenable != prev.to_reenable {
         if let Some(v) = &fresh.to_reenable {
+            let n = name_of(names, v);
             alerts.push(NunlAlert {
                 severity: Severity::Info,
                 category: "NUNL_PENDING_REENABLE",
                 key: v.clone(),
-                title: format!("Validator {} pending re-enable", short(v)),
-                text: format!("Validator `{v}` is scheduled to leave the Negative UNL at the next flag ledger."),
-                fields: vec![("validator".into(), v.clone())],
+                title: format!("Validator {n} pending re-enable"),
+                text: format!("{n} (`{v}`) is scheduled to leave the Negative UNL at the next flag ledger."),
+                fields: vec![("validator".into(), n)],
             });
         }
     }
@@ -153,12 +192,17 @@ pub async fn run(
     webhook: Option<String>,
     webhook_state: Option<String>,
     dry_run: bool,
+    names_file: Option<String>,
 ) -> anyhow::Result<()> {
     let fresh = fetch(endpoint).await?;
     let cold = !std::path::Path::new(state_file).exists();
     let prev: NunlState = cstate::load_state(state_file).unwrap_or_default();
+    let names = names_file
+        .as_deref()
+        .map(crate::detect::load_names)
+        .unwrap_or_default();
 
-    let alerts = diff(&prev, &fresh, cold);
+    let alerts = diff(&prev, &fresh, cold, &names);
     if let Err(e) = cstate::save_state(state_file, &fresh) {
         eprintln!("nunl: state save failed: {e}");
     }
@@ -191,14 +235,14 @@ mod tests {
 
     #[test]
     fn cold_start_silent() {
-        assert!(diff(&NunlState::default(), &st(&["EDAAA"]), true).is_empty());
+        assert!(diff(&NunlState::default(), &st(&["EDAAA"]), true, &HashMap::new()).is_empty());
     }
 
     #[test]
     fn disable_and_reenable() {
         let prev = st(&["EDAAA"]);
         let fresh = st(&["EDBBB"]);
-        let a = diff(&prev, &fresh, false);
+        let a = diff(&prev, &fresh, false, &HashMap::new());
         assert!(a.iter().any(|x| x.category == "NUNL_DISABLED" && x.key == "EDBBB"));
         assert!(a.iter().any(|x| x.category == "NUNL_REENABLED" && x.key == "EDAAA"));
     }
@@ -210,7 +254,7 @@ mod tests {
             to_disable: Some("EDCCC".into()),
             ..Default::default()
         };
-        let a = diff(&prev, &fresh, false);
+        let a = diff(&prev, &fresh, false, &HashMap::new());
         assert!(a.iter().any(|x| x.category == "NUNL_PENDING_DISABLE"));
     }
 }

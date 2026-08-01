@@ -10,6 +10,7 @@ EnvironmentFile=/etc/observatory.env
 ExecStart=/opt/observatory/bin/xrpl-crawler nunl \
   --endpoint https://s1.ripple.com:51234 \
   --state-file /var/lib/observatory/nunl-state.json \
+  --names-file /opt/observatory/validator-names.json \
   $MONITOR_FLAGS \
   --webhook-state /var/lib/observatory/nunl-alert-state.json
 StateDirectory=observatory

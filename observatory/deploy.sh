@@ -51,7 +51,8 @@ echo "==> installing binaries + config"
 "${SSH[@]}" 'sudo install -d /opt/observatory/bin && \
   sudo install /opt/observatory/src/target/release/vlwatch /opt/observatory/bin/ && \
   sudo install /opt/observatory/src/target/release/xrpl-crawler /opt/observatory/bin/ && \
-  sudo install -m0644 /opt/observatory/src/crawler/mainnet-unl.txt /opt/observatory/mainnet-unl.txt'
+  sudo install -m0644 /opt/observatory/src/crawler/mainnet-unl.txt /opt/observatory/mainnet-unl.txt && \
+  sudo install -m0644 /opt/observatory/src/crawler/validator-names.json /opt/observatory/validator-names.json'
 
 echo "==> installing publishers.txt + heartbeat.sh"
 rsync -az -e "$RSYNC_RSH" "$HERE/publishers.txt" "$HOST:/tmp/publishers.txt"

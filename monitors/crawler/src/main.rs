@@ -107,6 +107,10 @@ enum Command {
         /// Alert when validators run a build below this version (e.g. a hotfix "3.2.1")
         #[arg(long)]
         min_version: Option<String>,
+
+        /// JSON map of validator key → name, so alerts say who a validator is
+        #[arg(long)]
+        names_file: Option<String>,
     },
     /// Track network-wide amendment majority/activation via public ledger_entry
     Amendments {
@@ -151,6 +155,10 @@ enum Command {
         /// Evaluate and print alerts without posting
         #[arg(long)]
         dry_run: bool,
+
+        /// JSON map of validator key → name
+        #[arg(long)]
+        names_file: Option<String>,
     },
     /// Generate xrpld [ips_fixed] config from crawl results
     GenConfig {
@@ -206,6 +214,7 @@ async fn main() -> Result<()> {
             webhook_state,
             dry_run,
             min_version,
+            names_file,
         } => {
             monitor::run(
                 endpoints,
@@ -219,6 +228,7 @@ async fn main() -> Result<()> {
                 webhook_state,
                 dry_run,
                 min_version,
+                names_file,
             )
             .await
         }
@@ -235,7 +245,8 @@ async fn main() -> Result<()> {
             webhook,
             webhook_state,
             dry_run,
-        } => nunl::run(&endpoint, &state_file, webhook, webhook_state, dry_run).await,
+            names_file,
+        } => nunl::run(&endpoint, &state_file, webhook, webhook_state, dry_run, names_file).await,
         Command::GenConfig {
             state_file,
             max_peers,
