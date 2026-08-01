@@ -14,17 +14,17 @@ notifier service watches the VM's heartbeat from outside.
 
 ## Bring-up
 
-```sh
-cd terraform
-cp terraform.tfvars.example terraform.tfvars   # set project, tighten ssh_source_ranges
-terraform init && terraform apply
-IP=$(terraform output -raw external_ip)
+The monitors run on an existing host (a Proxmox VM). Just point `deploy.sh` at
+it — it builds the binaries on the host and installs the systemd units:
 
-cd ..
-HOST=observatory@$IP ./deploy.sh                # builds + starts everything
+```sh
+HOST=observatory@<host-ip> SSH_KEY=~/.ssh/xrpl-labs ./deploy.sh
 ```
 
 Redeploy a new build: re-run `./deploy.sh` (idempotent).
+
+`terraform/` is **optional** — only if you'd rather provision a fresh GCE VM
+than use the existing Proxmox box. The deploy step is the same either way.
 
 ## What runs
 

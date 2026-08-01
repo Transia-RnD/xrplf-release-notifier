@@ -5,6 +5,8 @@
 #
 # Usage: HOST=observatory@<ip> ./deploy.sh
 #   env: HOST (required)  SSH_KEY (default ~/.ssh/xrpl-labs)
+#        GCS_SA_KEY (optional path to a GCP SA key JSON; enables the heartbeat on
+#                    a non-GCP host — e.g. Proxmox — where metadata auth is absent)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -16,6 +18,21 @@ RSYNC_RSH="ssh -i $SSH_KEY -o IdentitiesOnly=yes"
 
 WEBHOOK="$(grep -E '^MATTERMOST_WEBHOOK_URL=' "$REPO/.env" | cut -d= -f2- | tr -d '"' || true)"
 [ -n "$WEBHOOK" ] || { echo "MATTERMOST_WEBHOOK_URL not found in $REPO/.env"; exit 1; }
+
+echo "==> ensuring toolchain on $HOST (rustup, build deps, gcloud)"
+"${SSH[@]}" 'set -e
+  sudo install -d -o observatory -g observatory /opt/observatory /var/lib/observatory
+  export DEBIAN_FRONTEND=noninteractive
+  sudo apt-get update -qq
+  sudo apt-get install -y -qq build-essential pkg-config perl make git rsync curl google-cloud-cli
+  sudo -u observatory bash -lc "command -v cargo >/dev/null || (curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y)"'
+
+# Optional GCS credential for the heartbeat (required off-GCP).
+if [ -n "${GCS_SA_KEY:-}" ]; then
+  echo "==> installing GCS SA key for heartbeat"
+  rsync -az -e "$RSYNC_RSH" "$GCS_SA_KEY" "$HOST:/tmp/observatory-sa.json"
+  "${SSH[@]}" 'sudo install -m0600 -o observatory -g observatory /tmp/observatory-sa.json /etc/observatory-sa.json && rm -f /tmp/observatory-sa.json'
+fi
 
 echo "==> syncing monitor sources to $HOST"
 "${SSH[@]}" 'sudo install -d -o observatory -g observatory /opt/observatory/src'
@@ -39,7 +56,9 @@ rsync -az -e "$RSYNC_RSH" "$HERE/heartbeat.sh" "$HOST:/tmp/heartbeat.sh"
   sudo install -m0755 /tmp/heartbeat.sh /opt/observatory/heartbeat.sh'
 
 echo "==> writing /etc/observatory.env"
-"${SSH[@]}" "printf 'MATTERMOST_WEBHOOK_URL=%s\nOBSERVATORY_STATE_BUCKET=xrplf-release-notifier\n' '$WEBHOOK' | sudo tee /etc/observatory.env >/dev/null && sudo chmod 600 /etc/observatory.env"
+GCREDS=""
+[ -n "${GCS_SA_KEY:-}" ] && GCREDS='GOOGLE_APPLICATION_CREDENTIALS=/etc/observatory-sa.json\n'
+"${SSH[@]}" "printf 'MATTERMOST_WEBHOOK_URL=%s\nOBSERVATORY_STATE_BUCKET=xrplf-release-notifier\n${GCREDS}' '$WEBHOOK' | sudo tee /etc/observatory.env >/dev/null && sudo chmod 600 /etc/observatory.env"
 
 echo "==> installing systemd units"
 rsync -az -e "$RSYNC_RSH" "$HERE/systemd/" "$HOST:/tmp/observatory-units/"
