@@ -1,0 +1,434 @@
+use serde::Serialize;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::Instant;
+
+const DEFAULT_WINDOW_SECS: u64 = 12;
+const DEFAULT_MAX_WINDOWS: usize = 200;
+const DEFAULT_SILENCE_SECS: u64 = 120;
+const DEFAULT_MULTI_SILENCE_THRESHOLD: usize = 3;
+const DEFAULT_STALL_SECS: u64 = 15;
+const DEFAULT_WARMUP_SECS: u64 = 30;
+
+fn ts() -> String {
+    chrono::Utc::now().format("%H:%M:%S").to_string()
+}
+
+#[derive(Debug, Serialize)]
+pub struct Alert {
+    pub ts: String,
+    pub severity: &'static str,
+    pub category: &'static str,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ledger_seq: Option<u64>,
+    #[serde(skip_serializing_if = "serde_json::Value::is_null")]
+    pub details: serde_json::Value,
+}
+
+struct LedgerWindow {
+    first_seen: Instant,
+    hashes: HashMap<String, HashSet<String>>,
+    all_validators: HashSet<String>,
+    unl_validators: HashSet<String>,
+    finalized: bool,
+}
+
+pub struct DetectionEngine {
+    unl_keys: HashSet<String>,
+    min_validators: usize,
+
+    ledgers: HashMap<u64, LedgerWindow>,
+    finalized_order: VecDeque<u64>,
+
+    validator_last_seen: HashMap<String, Instant>,
+
+    highest_seq: u64,
+    last_seq_advance: Instant,
+    chain_stalled: bool,
+    last_silence_check: Instant,
+    last_stall_check: Instant,
+    started_at: Instant,
+
+    window_secs: u64,
+    max_windows: usize,
+    silence_secs: u64,
+    multi_silence_threshold: usize,
+    stall_secs: u64,
+    warmup_secs: u64,
+}
+
+impl DetectionEngine {
+    pub fn new(unl_keys: HashSet<String>, min_validators: Option<usize>) -> Self {
+        let min = min_validators.unwrap_or_else(|| {
+            if unl_keys.is_empty() {
+                20
+            } else {
+                (unl_keys.len() * 4).div_ceil(5)
+            }
+        });
+
+        eprintln!(
+            "[{}] detection engine: {} UNL keys, min_validators={}",
+            ts(),
+            unl_keys.len(),
+            min
+        );
+
+        let now = Instant::now();
+        Self {
+            unl_keys,
+            min_validators: min,
+            ledgers: HashMap::new(),
+            finalized_order: VecDeque::new(),
+            validator_last_seen: HashMap::new(),
+            highest_seq: 0,
+            last_seq_advance: now,
+            chain_stalled: false,
+            last_silence_check: now,
+            last_stall_check: now,
+            started_at: now,
+            window_secs: DEFAULT_WINDOW_SECS,
+            max_windows: DEFAULT_MAX_WINDOWS,
+            silence_secs: DEFAULT_SILENCE_SECS,
+            multi_silence_threshold: DEFAULT_MULTI_SILENCE_THRESHOLD,
+            stall_secs: DEFAULT_STALL_SECS,
+            warmup_secs: DEFAULT_WARMUP_SECS,
+        }
+    }
+
+    pub fn process_validation(
+        &mut self,
+        master_key: Option<&str>,
+        ledger_hash: &str,
+        ledger_index: u64,
+    ) -> Vec<Alert> {
+        let mut alerts = Vec::new();
+
+        let mk = match master_key {
+            Some(k) if !k.is_empty() => k.to_string(),
+            _ => return alerts,
+        };
+
+        let now = Instant::now();
+        let warmed_up = now.duration_since(self.started_at).as_secs() > self.warmup_secs;
+
+        self.validator_last_seen.insert(mk.clone(), now);
+
+        if ledger_index > self.highest_seq {
+            if warmed_up && self.highest_seq > 0 && ledger_index > self.highest_seq + 5 {
+                let was_stalled = self.chain_stalled;
+                let severity = if was_stalled { "CRITICAL" } else { "WARNING" };
+                let category = if was_stalled {
+                    "STALL_RECOVERY"
+                } else {
+                    "SEQUENCE_GAP"
+                };
+                alerts.push(Alert {
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    severity,
+                    category,
+                    message: format!(
+                        "Ledger sequence jumped {} -> {} (gap of {}){}",
+                        self.highest_seq,
+                        ledger_index,
+                        ledger_index - self.highest_seq,
+                        if was_stalled {
+                            " — CHAIN RESUMED AFTER STALL (possible fork adoption)"
+                        } else {
+                            ""
+                        }
+                    ),
+                    ledger_seq: Some(ledger_index),
+                    details: serde_json::json!({
+                        "previous_seq": self.highest_seq,
+                        "new_seq": ledger_index,
+                        "gap": ledger_index - self.highest_seq,
+                        "was_stalled": was_stalled,
+                    }),
+                });
+            }
+            self.highest_seq = ledger_index;
+            self.last_seq_advance = now;
+            self.chain_stalled = false;
+        }
+
+        // Stall detection (check every 5s)
+        if warmed_up
+            && now.duration_since(self.last_stall_check).as_secs() > 5
+        {
+            self.last_stall_check = now;
+            let secs_since_advance = now.duration_since(self.last_seq_advance).as_secs();
+            if secs_since_advance > self.stall_secs && !self.chain_stalled {
+                self.chain_stalled = true;
+                alerts.push(Alert {
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    severity: "CRITICAL",
+                    category: "CHAIN_STALL",
+                    message: format!(
+                        "No new validated ledger for {}s (last seq: {}) — chain may be stalled",
+                        secs_since_advance, self.highest_seq
+                    ),
+                    ledger_seq: Some(self.highest_seq),
+                    details: serde_json::json!({
+                        "seconds_since_advance": secs_since_advance,
+                        "last_seq": self.highest_seq,
+                    }),
+                });
+            }
+        }
+
+        let is_unl = self.unl_keys.contains(&mk);
+        let window = self.ledgers.entry(ledger_index).or_insert_with(|| LedgerWindow {
+            first_seen: Instant::now(),
+            hashes: HashMap::new(),
+            all_validators: HashSet::new(),
+            unl_validators: HashSet::new(),
+            finalized: false,
+        });
+
+        if !window.finalized {
+            window.all_validators.insert(mk.clone());
+            window
+                .hashes
+                .entry(ledger_hash.to_string())
+                .or_default()
+                .insert(mk.clone());
+            if is_unl {
+                window.unl_validators.insert(mk);
+            }
+        }
+
+        alerts.extend(self.finalize_old_windows());
+
+        if warmed_up && self.last_silence_check.elapsed() > std::time::Duration::from_secs(30) {
+            alerts.extend(self.check_silence());
+            self.last_silence_check = Instant::now();
+        }
+
+        alerts
+    }
+
+    fn finalize_old_windows(&mut self) -> Vec<Alert> {
+        let mut alerts = Vec::new();
+        let now = Instant::now();
+        let warmed_up = now.duration_since(self.started_at).as_secs() > self.warmup_secs;
+        let window_duration = std::time::Duration::from_secs(self.window_secs);
+
+        let seqs_to_finalize: Vec<u64> = self
+            .ledgers
+            .iter()
+            .filter(|(_, w)| !w.finalized && now.duration_since(w.first_seen) > window_duration)
+            .map(|(seq, _)| *seq)
+            .collect();
+
+        for seq in seqs_to_finalize {
+            if let Some(window) = self.ledgers.get_mut(&seq) {
+                window.finalized = true;
+                self.finalized_order.push_back(seq);
+
+                if !warmed_up {
+                    continue;
+                }
+
+                // --- FORK DETECTION ---
+                if window.hashes.len() > 1 {
+                    let mut fork_details = Vec::new();
+                    for (hash, validators) in &window.hashes {
+                        let unl_on_hash: Vec<&String> = validators
+                            .iter()
+                            .filter(|v| self.unl_keys.contains(*v))
+                            .collect();
+                        fork_details.push(serde_json::json!({
+                            "hash": &hash[..16.min(hash.len())],
+                            "total_validators": validators.len(),
+                            "unl_validators": unl_on_hash.len(),
+                            "unl_keys": unl_on_hash,
+                        }));
+                    }
+
+                    let unl_fork_sides = window
+                        .hashes
+                        .values()
+                        .filter(|vs| vs.iter().any(|v| self.unl_keys.contains(v)))
+                        .count();
+
+                    let severity = if unl_fork_sides > 1 {
+                        "CRITICAL"
+                    } else {
+                        "WARNING"
+                    };
+
+                    alerts.push(Alert {
+                        ts: chrono::Utc::now().to_rfc3339(),
+                        severity,
+                        category: "FORK_DETECTED",
+                        message: format!(
+                            "Ledger {} has {} hashes from {} validators{}",
+                            seq,
+                            window.hashes.len(),
+                            window.all_validators.len(),
+                            if unl_fork_sides > 1 {
+                                " — UNL SPLIT ACROSS BRANCHES"
+                            } else {
+                                ""
+                            }
+                        ),
+                        ledger_seq: Some(seq),
+                        details: serde_json::json!({ "branches": fork_details }),
+                    });
+                }
+
+                // --- QUORUM CHECK ---
+                if !self.unl_keys.is_empty() {
+                    let unl_count = window.unl_validators.len();
+                    if unl_count < self.min_validators {
+                        let missing: Vec<&String> = self
+                            .unl_keys
+                            .iter()
+                            .filter(|k| !window.unl_validators.contains(*k))
+                            .collect();
+
+                        let severity = if unl_count < self.min_validators / 2 {
+                            "CRITICAL"
+                        } else {
+                            "WARNING"
+                        };
+
+                        alerts.push(Alert {
+                            ts: chrono::Utc::now().to_rfc3339(),
+                            severity,
+                            category: "LOW_QUORUM",
+                            message: format!(
+                                "Ledger {} has {}/{} UNL validations (need {}, missing {})",
+                                seq,
+                                unl_count,
+                                self.unl_keys.len(),
+                                self.min_validators,
+                                missing.len()
+                            ),
+                            ledger_seq: Some(seq),
+                            details: serde_json::json!({
+                                "unl_count": unl_count,
+                                "unl_size": self.unl_keys.len(),
+                                "min_required": self.min_validators,
+                                "missing_validators": missing,
+                            }),
+                        });
+                    }
+                }
+            }
+        }
+
+        while self.finalized_order.len() > self.max_windows {
+            if let Some(old_seq) = self.finalized_order.pop_front() {
+                self.ledgers.remove(&old_seq);
+            }
+        }
+
+        alerts
+    }
+
+    fn check_silence(&self) -> Vec<Alert> {
+        if self.unl_keys.is_empty() {
+            return Vec::new();
+        }
+
+        let mut alerts = Vec::new();
+        let now = Instant::now();
+        let threshold = std::time::Duration::from_secs(self.silence_secs);
+
+        let mut silent: Vec<String> = Vec::new();
+        let mut never_seen: Vec<String> = Vec::new();
+
+        for key in &self.unl_keys {
+            match self.validator_last_seen.get(key) {
+                Some(last) if now.duration_since(*last) > threshold => {
+                    silent.push(key.clone());
+                }
+                None if self.highest_seq > 0 => {
+                    never_seen.push(key.clone());
+                }
+                _ => {}
+            }
+        }
+
+        let total_missing = silent.len() + never_seen.len();
+
+        if total_missing >= self.multi_silence_threshold {
+            let quorum_gap = self.unl_keys.len().saturating_sub(self.min_validators);
+            let severity = if total_missing > quorum_gap {
+                "CRITICAL"
+            } else {
+                "WARNING"
+            };
+
+            alerts.push(Alert {
+                ts: chrono::Utc::now().to_rfc3339(),
+                severity,
+                category: "VALIDATORS_SILENT",
+                message: format!(
+                    "{}/{} UNL validators missing ({} silent >{}s, {} never seen) — partition risk",
+                    total_missing,
+                    self.unl_keys.len(),
+                    silent.len(),
+                    self.silence_secs,
+                    never_seen.len()
+                ),
+                ledger_seq: None,
+                details: serde_json::json!({
+                    "silent_validators": silent,
+                    "never_seen_validators": never_seen,
+                    "total_missing": total_missing,
+                    "can_still_reach_quorum": total_missing <= quorum_gap,
+                }),
+            });
+        }
+
+        alerts
+    }
+
+    pub fn status_summary(&self) -> String {
+        let active_unl = if self.unl_keys.is_empty() {
+            0
+        } else {
+            let now = Instant::now();
+            let recent = std::time::Duration::from_secs(30);
+            self.unl_keys
+                .iter()
+                .filter(|k| {
+                    self.validator_last_seen
+                        .get(*k)
+                        .is_some_and(|t| now.duration_since(*t) < recent)
+                })
+                .count()
+        };
+
+        format!(
+            "seq={} | windows={} | active_unl={}/{}",
+            self.highest_seq,
+            self.ledgers.len(),
+            active_unl,
+            self.unl_keys.len(),
+        )
+    }
+}
+
+pub fn load_unl_file(path: &str) -> HashSet<String> {
+    let mut keys = HashSet::new();
+    let data = match std::fs::read_to_string(path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[{}] failed to read UNL file {}: {}", ts(), path, e);
+            return keys;
+        }
+    };
+    for line in data.lines() {
+        let key = line.trim();
+        if key.is_empty() || key.starts_with('#') {
+            continue;
+        }
+        keys.insert(key.to_string());
+    }
+    eprintln!("[{}] loaded {} UNL keys from {}", ts(), keys.len(), path);
+    keys
+}
