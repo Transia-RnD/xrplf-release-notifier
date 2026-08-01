@@ -71,6 +71,20 @@ ansible-playbook logmon.yml -e @vault.yml --ask-vault-pass
 JSONL lands at `gs://xrplf-release-notifier/stage-node-logs/<host>/`; the
 watchdog's LOGS_STALE/LOG_ERRORS read it.
 
+## Kill switch (stop posting NOW)
+
+```bash
+# Instant: halt all monitors — posting stops within a second (VM stays up).
+ssh -i ~/.ssh/xrpl-labs observatory@34.135.236.149 \
+  'sudo systemctl stop vlwatch crawler-monitor crawler-crawl.timer crawler-amendments.timer crawler-nunl.timer observatory-heartbeat.timer'
+
+# Back to silent instead of stopped (keeps observing, posts nothing):
+HOST=observatory@34.135.236.149 SILENT=1 ./deploy.sh
+
+# Nuclear: power off the VM.
+gcloud compute instances stop xrpl-observatory --zone=us-central1-a --project=xrplf-release-notifier
+```
+
 ## Rollback
 
 - Monitors: `ssh observatory@$IP 'sudo systemctl disable --now vlwatch crawler-monitor crawler-crawl.timer crawler-amendments.timer'`
