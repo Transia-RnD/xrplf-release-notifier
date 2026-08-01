@@ -49,10 +49,16 @@ Suspicious-version detection is **off unless** `--suspicious-version` is set.
 | `ECLIPSE_RISK` | CRITICAL (any high) / WARNING (≥3 medium) | Legitimate nodes have a majority of suspicious inbound peers | 24h |
 | `TOPOLOGY_COLLAPSE` | WARNING | Reachable node count fell below 60% of the previous crawl (partition/crawl failure) | 24h |
 | `NEW_VERSION` | INFO | A version absent last crawl now runs on ≥10 nodes (a release rolling out) | per version, 24h |
+| `PATCH_ADOPTION` | INFO (<10% vulnerable) / WARNING / CRITICAL (≥50%) | `--min-safe-version X.Y.Z` set: share of core (rippled/xrpld) nodes at/above the hotfix version, with top vulnerable builds | on movement + 12h heartbeat |
 
-Ad-hoc: `scripts/attack-report.py` turns a crawl `--report-json` into a
-manifest-flood **patch-adoption** post (patched ≥3.2.1 vs vulnerable). One-shot
-situational tool; fold into a recurring crawl alert if we want it standing.
+`PATCH_ADOPTION` is the standing version of `scripts/attack-report.py` (the
+manifest-flood incident post) and keeps its classification: base semver of
+`rippled-`/`xrpld-` builds, pre-releases of the fix count as patched, non-core
+clients bucket as "other". Cadence: the hourly crawl always evaluates; the
+dedup key encodes the patched percent, so any percentage-point move posts
+immediately, while an unchanged percent re-posts only every 12h. The unit ships
+`--min-safe-version 3.2.1` (the manifest-flood hotfix); bump the flag when the
+next security release becomes the floor.
 
 ## crawler `amendments` — on-ledger amendment tracking (periodic, observatory VM)
 

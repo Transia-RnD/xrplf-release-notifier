@@ -119,6 +119,7 @@ pub async fn run(
     resume: bool,
     output: &str,
     report_json: Option<&str>,
+    min_safe_version: Option<&str>,
     webhook: Option<String>,
     webhook_state: Option<String>,
     dry_run: bool,
@@ -263,6 +264,7 @@ pub async fn run(
         let mut sink = AlertSink::new(webhook, dry_run, webhook_state, "xrpl-crawler/crawl");
         if sink.enabled() {
             let now = chrono::Utc::now().timestamp();
+            let mut evaluated = alerts.len();
             for a in &alerts {
                 sink.send(
                     a.severity,
@@ -274,7 +276,30 @@ pub async fn run(
                     now,
                 );
             }
-            eprintln!("crawler: {} snapshot alert(s) evaluated", alerts.len());
+            // Adoption status card: every crawl evaluates; the percent-encoding
+            // dedup key posts movement immediately, steady state heartbeats.
+            if let Some(min_s) = min_safe_version {
+                match crate::version::parse_min(min_s) {
+                    Some(min) => {
+                        let a = report::evaluate_adoption(&fresh, min);
+                        sink.send_every(
+                            report::ADOPTION_REALERT_SECS,
+                            a.severity,
+                            a.category,
+                            &a.key,
+                            &a.title,
+                            &a.text,
+                            a.fields.clone(),
+                            now,
+                        );
+                        evaluated += 1;
+                    }
+                    None => eprintln!(
+                        "crawler: --min-safe-version '{min_s}' is not X.Y.Z — adoption skipped"
+                    ),
+                }
+            }
+            eprintln!("crawler: {evaluated} snapshot alert(s) evaluated");
         }
     }
     Ok(())

@@ -58,6 +58,12 @@ enum Command {
         #[arg(long)]
         report_json: Option<String>,
 
+        /// Post a PATCH_ADOPTION status card: share of core nodes at/above this
+        /// version, e.g. a hotfix like 3.2.1 (needs --report-json; posts on
+        /// movement, else every 12h)
+        #[arg(long)]
+        min_safe_version: Option<String>,
+
         /// Mattermost webhook URL for alerts
         #[arg(long)]
         webhook: Option<String>,
@@ -201,6 +207,7 @@ async fn main() -> Result<()> {
             resume,
             output,
             report_json,
+            min_safe_version,
             webhook,
             webhook_state,
             dry_run,
@@ -213,6 +220,7 @@ async fn main() -> Result<()> {
                 resume,
                 &output,
                 report_json.as_deref(),
+                min_safe_version.as_deref(),
                 webhook,
                 webhook_state,
                 dry_run,

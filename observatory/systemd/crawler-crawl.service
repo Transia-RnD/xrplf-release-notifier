@@ -12,6 +12,7 @@ ExecStart=/opt/observatory/bin/xrpl-crawler crawl \
   --concurrency 60 --timeout 6 \
   --output /var/lib/observatory/crawl-state.json \
   --report-json /var/lib/observatory/crawl-report.json \
+  --min-safe-version 3.2.1 \
   $MONITOR_FLAGS \
   --webhook-state /var/lib/observatory/crawl-alert-state.json
 StateDirectory=observatory
