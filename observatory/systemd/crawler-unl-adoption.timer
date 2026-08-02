@@ -1,0 +1,9 @@
+[Unit]
+Description=Report XRPL mainnet UNL hotfix adoption hourly
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target

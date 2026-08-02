@@ -78,9 +78,9 @@ echo "==> installing systemd units"
 rsync -az -e "$RSYNC_RSH" "$HERE/systemd/" "$HOST:/tmp/observatory-units/"
 "${SSH[@]}" 'sudo cp /tmp/observatory-units/*.service /tmp/observatory-units/*.timer /etc/systemd/system/ && \
   sudo systemctl daemon-reload && \
-  sudo systemctl enable --now vlwatch.service crawler-monitor.service crawler-crawl.timer crawler-amendments.timer crawler-nunl.timer observatory-heartbeat.timer && \
+  sudo systemctl enable --now vlwatch.service crawler-monitor.service crawler-crawl.timer crawler-amendments.timer crawler-nunl.timer crawler-unl-adoption.timer observatory-heartbeat.timer && \
   sudo systemctl restart vlwatch.service crawler-monitor.service'
 
 echo "==> status"
-"${SSH[@]}" 'systemctl --no-pager --lines=0 status vlwatch.service crawler-monitor.service crawler-crawl.timer crawler-amendments.timer crawler-nunl.timer observatory-heartbeat.timer | grep -E "●|Active:"'
+"${SSH[@]}" 'systemctl --no-pager --lines=0 status vlwatch.service crawler-monitor.service crawler-crawl.timer crawler-amendments.timer crawler-nunl.timer crawler-unl-adoption.timer observatory-heartbeat.timer | grep -E "●|Active:"'
 echo "deploy complete."
