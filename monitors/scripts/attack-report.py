@@ -69,7 +69,8 @@ def payload(report: dict):
                 "text": text,
                 "fields": [
                     {"title": "patched (>=3.2.1)", "value": str(buckets["patched"]), "short": True},
-                    {"title": "vulnerable (<3.2.1)", "value": str(buckets["vulnerable"]), "short": True},
+                    # "pre-X" not "<X": Mattermost renders "<3" as a heart emoji
+                    {"title": "vulnerable (pre-3.2.1)", "value": str(buckets["vulnerable"]), "short": True},
                     {"title": "other/non-core", "value": str(buckets["other"]), "short": True},
                     {"title": "total crawled", "value": str(total), "short": True},
                 ],

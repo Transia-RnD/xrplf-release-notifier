@@ -325,7 +325,8 @@ pub fn evaluate_adoption(report: &Report, min: (u8, u8, u8)) -> RuleAlert {
         text,
         fields: vec![
             (format!("patched (>={min_s})"), patched.to_string()),
-            (format!("vulnerable (<{min_s})"), vulnerable.to_string()),
+            // "pre-X" not "<X": Mattermost renders "<3" as a heart emoji
+            (format!("vulnerable (pre-{min_s})"), vulnerable.to_string()),
             ("other/non-core".into(), other.to_string()),
             ("total crawled".into(), report.nodes.to_string()),
         ],

@@ -122,7 +122,8 @@ fn evaluate(validators: &[FeedValidator], min: (u8, u8, u8)) -> AdoptionCard {
         fields: vec![
             (format!("patched (>={min_s})"), patched.to_string()),
             (
-                format!("vulnerable (<{min_s})"),
+                // "pre-X" not "<X": Mattermost renders "<3" as a heart emoji
+                format!("vulnerable (pre-{min_s})"),
                 vulnerable.len().to_string(),
             ),
             ("no version".into(), unknown.to_string()),
