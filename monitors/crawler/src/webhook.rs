@@ -72,12 +72,37 @@ impl AlertSink {
         fields: Vec<(String, String)>,
         now_unix: i64,
     ) {
+        self.send_every(
+            REALERT_SECS,
+            severity,
+            category,
+            key,
+            title,
+            text,
+            fields,
+            now_unix,
+        )
+    }
+
+    /// [`Self::send`] with a caller-chosen re-fire window instead of REALERT_SECS.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_every(
+        &mut self,
+        realert_secs: i64,
+        severity: Severity,
+        category: &str,
+        key: &str,
+        title: &str,
+        text: &str,
+        fields: Vec<(String, String)>,
+        now_unix: i64,
+    ) {
         if !self.enabled {
             return;
         }
         let dkey = format!("{category}:{key}");
         if let Some(&last) = self.dedup.last_sent.get(&dkey) {
-            if now_unix - last < REALERT_SECS {
+            if now_unix - last < realert_secs {
                 return;
             }
         }

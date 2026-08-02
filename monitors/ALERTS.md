@@ -49,10 +49,16 @@ Suspicious-version detection is **off unless** `--suspicious-version` is set.
 | `ECLIPSE_RISK` | CRITICAL (any high) / WARNING (≥3 medium) | Legitimate nodes have a majority of suspicious inbound peers | 24h |
 | `TOPOLOGY_COLLAPSE` | WARNING | Reachable node count fell below 60% of the previous crawl (partition/crawl failure) | 24h |
 | `NEW_VERSION` | INFO | A version absent last crawl now runs on ≥10 nodes (a release rolling out) | per version, 24h |
+| `PATCH_ADOPTION` | INFO (<10% vulnerable) / WARNING / CRITICAL (≥50%) | `--min-safe-version X.Y.Z` set: share of core (rippled/xrpld) nodes at/above the hotfix version, with top vulnerable builds | on movement + 12h heartbeat |
 
-Ad-hoc: `scripts/attack-report.py` turns a crawl `--report-json` into a
-manifest-flood **patch-adoption** post (patched ≥3.2.1 vs vulnerable). One-shot
-situational tool; fold into a recurring crawl alert if we want it standing.
+`PATCH_ADOPTION` is the standing version of `scripts/attack-report.py` (the
+manifest-flood incident post) and keeps its classification: base semver of
+`rippled-`/`xrpld-` builds, pre-releases of the fix count as patched, non-core
+clients bucket as "other". Cadence: the hourly crawl always evaluates; the
+dedup key encodes the patched percent, so any percentage-point move posts
+immediately, while an unchanged percent re-posts only every 12h. The unit ships
+`--min-safe-version 3.2.1` (the manifest-flood hotfix); bump the flag when the
+next security release becomes the floor.
 
 ## crawler `amendments` — on-ledger amendment tracking (periodic, observatory VM)
 
@@ -74,17 +80,31 @@ Polls the on-ledger NegativeUNL object and diffs the disabled set.
 | `NUNL_DISABLED` | WARNING | A validator is added to the Negative UNL (unreliable/offline) | per validator, 24h |
 | `NUNL_REENABLED` | INFO | A validator recovers and leaves the Negative UNL | per validator, 24h |
 
-## crawler `monitor --min-version` — validator upgrade adoption (post-hotfix)
+## crawler `unl-adoption` — XRPL mainnet UNL hotfix adoption (hourly, observatory VM)
+
+Polls data.xrpl.org's validator feed (which resolves each validator's
+`server_version`, `domain`, and UNL publisher), restricts to the XRPL **mainnet**
+UNL (`chain == "main"`, non-empty `unl` publisher), and reports how many trusted
+validators run a build at/above `--min-safe-version`. Members whose feed entry
+carries no version are reported but excluded from the percentage.
 
 | Alert | Severity | Fires when | Dedup |
 |-------|----------|-----------|-------|
-| `VALIDATOR_VERSION_LAG` | WARNING / CRITICAL (≥34% lag) | Validators run a build below `--min-version` (a hotfix), decoded from `server_version` in validations | 24h |
+| `UNL_PATCH_ADOPTION` | INFO (<10% vulnerable) / WARNING / CRITICAL (≥50%) | Share of reporting UNL validators at/above the hotfix, naming the vulnerable ones by domain | on movement + 12h heartbeat |
 
-**Caveat:** `server_version` is not reliably present on the *public* validations
-stream (observed ~0% coverage on s1/s2). This alert only produces signal when
-`monitor` is pointed at an endpoint that relays it (e.g. the stage node's admin
-WS). The decoder (rippled `BuildInfo` layout) and rule are unit-tested; with no
-version data it simply no-ops.
+Same cadence as the network-wide `PATCH_ADOPTION`: the dedup key encodes the
+patched percent, so a change posts immediately and an unchanged percent
+re-posts every 12h. RCs of the fix count as vulnerable (the fix lands in the
+final). Unit ships `--min-safe-version 3.2.1`.
+
+**Why this and not the validations stream:** the overlay binds a build version
+only to a node key and validator identity only to a master key, and the two
+never cross on the wire — validations carry **no** `ServerVersion` (verified
+live: 0/300 in the raw validation binary, so no admin/private endpoint can
+surface it either). data.xrpl.org already does the master-key→version resolution
+out-of-band, so this consumes that rather than trying to observe it passively.
+The old `monitor --min-version` / `VALIDATOR_VERSION_LAG` decoder is retained but
+inert (validations never carry the field); `unl-adoption` supersedes it.
 
 ## notifier watchdog — external vantage (Cloud Run, every 15 min) — planned
 

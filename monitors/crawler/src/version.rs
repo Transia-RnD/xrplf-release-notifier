@@ -72,6 +72,24 @@ pub fn parse_min(s: &str) -> Option<(u8, u8, u8)> {
     ))
 }
 
+/// Parse a human version string as reported by data.xrpl.org's validator feed
+/// ("3.2.0", "3.2.1-rc1", "3.2.0-b7") into a [`Version`]. Any pre-release
+/// suffix marks `is_final = false`, so an RC of the hotfix ranks below the
+/// final via [`Version::below`], matching the crawl's classification.
+pub fn parse_semver(s: &str) -> Option<Version> {
+    let (core, pre) = match s.split_once('-') {
+        Some((c, _)) => (c, false),
+        None => (s, true),
+    };
+    let (major, minor, patch) = parse_min(core)?;
+    Some(Version {
+        major,
+        minor,
+        patch,
+        is_final: pre,
+    })
+}
+
 /// Evaluate UNL upgrade adoption: how many observed validators run a build below
 /// `min`. Returns an alert when any lag (severity scales with the share).
 pub fn evaluate_adoption(versions: &HashMap<String, Version>, min: (u8, u8, u8)) -> Option<Alert> {
@@ -129,6 +147,20 @@ mod tests {
     fn non_rippled_value_is_none() {
         assert!(decode(0).is_none());
         assert!(decode(12345).is_none());
+    }
+
+    #[test]
+    fn parse_semver_handles_data_api_strings() {
+        assert_eq!(parse_semver("3.2.0").unwrap().tuple(), (3, 2, 0));
+        assert!(parse_semver("3.2.0").unwrap().is_final);
+        // an RC of the fix parses as a pre-release and ranks below the final
+        let rc = parse_semver("3.2.1-rc1").unwrap();
+        assert_eq!(rc.tuple(), (3, 2, 1));
+        assert!(!rc.is_final);
+        assert!(rc.below((3, 2, 1)));
+        assert!(parse_semver("3.2.0-b7").unwrap().below((3, 2, 1)));
+        assert!(!parse_semver("3.3.0").unwrap().below((3, 2, 1)));
+        assert!(parse_semver("garbage").is_none());
     }
 
     #[test]

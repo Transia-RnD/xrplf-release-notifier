@@ -20,6 +20,14 @@ pub const COLLAPSE_RATIO_PCT: usize = 60;
 /// A version new since the last crawl needs at least this many nodes to report
 /// (filters one-off dev/test builds from a genuine release rollout).
 pub const NEW_VERSION_MIN_NODES: usize = 10;
+/// PATCH_ADOPTION re-post window while the patched share is unchanged. Movement
+/// (a new percent, hence a new dedup key) posts immediately; steady state
+/// heartbeats at this interval instead of the default 24h.
+pub const ADOPTION_REALERT_SECS: i64 = 43_200;
+/// Vulnerable share ≥ this → PATCH_ADOPTION posts CRITICAL.
+pub const ADOPTION_CRIT_PCT: usize = 50;
+/// Vulnerable share ≥ this (and < critical) → WARNING; below → INFO.
+pub const ADOPTION_WARN_PCT: usize = 10;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Report {
@@ -247,6 +255,83 @@ pub fn evaluate(report: &Report, prev: Option<&Report>) -> Vec<RuleAlert> {
     out
 }
 
+/// Base semver of a core rippled/xrpld build string ("xrpld-3.2.1-rc1" →
+/// (3,2,1)), or None for non-core clients ("xrpl-rust-validator/0.1.0",
+/// "xrpld-rs-3.2.0", "unknown").
+pub fn core_semver(version: &str) -> Option<(u8, u8, u8)> {
+    let rest = version
+        .strip_prefix("rippled-")
+        .or_else(|| version.strip_prefix("xrpld-"))?;
+    let mut parts = rest.splitn(3, '.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch: String = parts
+        .next()?
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    Some((major, minor, patch.parse().ok()?))
+}
+
+/// PATCH_ADOPTION — share of core nodes running a build at/above `min` (a
+/// hotfix). Pre-releases of `min` itself count as patched, matching the
+/// incident-time attack-report.py. Always returns an alert (it's a status
+/// card, not a fault signal); the dedup key encodes the patched percent so a
+/// change posts immediately and steady state falls to the heartbeat window.
+pub fn evaluate_adoption(report: &Report, min: (u8, u8, u8)) -> RuleAlert {
+    let (mut patched, mut vulnerable, mut other) = (0usize, 0usize, 0usize);
+    let mut lagging: Vec<(&str, usize)> = Vec::new();
+    for (ver, &count) in &report.versions {
+        match core_semver(ver) {
+            Some(base) if base >= min => patched += count,
+            Some(_) => {
+                vulnerable += count;
+                lagging.push((ver, count));
+            }
+            None => other += count,
+        }
+    }
+    let core = patched + vulnerable;
+    let patched_pct = patched * 100 / core.max(1);
+    let vuln_pct = vulnerable * 100 / core.max(1);
+    let severity = if vuln_pct >= ADOPTION_CRIT_PCT {
+        Severity::Critical
+    } else if vuln_pct >= ADOPTION_WARN_PCT {
+        Severity::Warning
+    } else {
+        Severity::Info
+    };
+    lagging.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let top = lagging
+        .iter()
+        .take(5)
+        .map(|(v, c)| format!("- `{v}` — {c}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let min_s = format!("{}.{}.{}", min.0, min.1, min.2);
+    let mut text = format!(
+        "Crawl of {} reachable nodes: of {core} core (rippled/xrpld) nodes, \
+         {patched_pct}% run >={min_s} and {vuln_pct}% remain on vulnerable pre-{min_s} builds.",
+        report.nodes
+    );
+    if !top.is_empty() {
+        text.push_str(&format!("\n\n**Top vulnerable builds:**\n{top}"));
+    }
+    RuleAlert {
+        severity,
+        category: "PATCH_ADOPTION",
+        key: format!("{min_s}@{patched_pct}"),
+        title: format!("Patch adoption: {patched_pct}% of core nodes on >={min_s}"),
+        text,
+        fields: vec![
+            (format!("patched (>={min_s})"), patched.to_string()),
+            (format!("vulnerable (<{min_s})"), vulnerable.to_string()),
+            ("other/non-core".into(), other.to_string()),
+            ("total crawled".into(), report.nodes.to_string()),
+        ],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,6 +388,66 @@ mod tests {
         assert!(!evaluate(&now, None)
             .iter()
             .any(|x| x.category == "NEW_VERSION"));
+    }
+
+    #[test]
+    fn core_semver_matches_attack_report_classification() {
+        // core builds, incl. pre-releases and vendor suffixes
+        assert_eq!(core_semver("xrpld-3.2.1"), Some((3, 2, 1)));
+        assert_eq!(core_semver("rippled-3.1.3"), Some((3, 1, 3)));
+        assert_eq!(core_semver("xrpld-3.2.1-rc1"), Some((3, 2, 1)));
+        assert_eq!(core_semver("xrpld-3.3.0-b1"), Some((3, 3, 0)));
+        assert_eq!(core_semver("xrpld-3.2.0-DJS"), Some((3, 2, 0)));
+        assert_eq!(
+            core_semver("xrpld-3.3.0-rc1+5db10a4d.DEBUG"),
+            Some((3, 3, 0))
+        );
+        // non-core / unparseable
+        assert_eq!(core_semver("xrpl-rust-validator/0.1.0"), None);
+        assert_eq!(core_semver("xrpld-rs-3.2.0"), None);
+        assert_eq!(core_semver("unknown"), None);
+        assert_eq!(core_semver("Hubster/1.0.0"), None);
+        assert_eq!(core_semver("xrpld-3.2"), None);
+    }
+
+    #[test]
+    fn adoption_buckets_percent_and_severity() {
+        let mut r = rpt(1000, 0, 0, 0);
+        r.versions = HashMap::from([
+            ("xrpld-3.2.1".into(), 150),
+            ("xrpld-3.3.0-rc6".into(), 50),
+            ("xrpld-3.2.0".into(), 600),
+            ("rippled-3.1.3".into(), 200),
+            ("xrpl-rust-validator/0.1.0".into(), 50),
+        ]);
+        let a = evaluate_adoption(&r, (3, 2, 1));
+        // 200 patched / 1000 core → 20%, 80% vulnerable → CRITICAL
+        assert_eq!(a.severity, Severity::Critical);
+        assert_eq!(a.key, "3.2.1@20");
+        assert!(a.title.contains("20%"));
+        assert!(a.text.contains("xrpld-3.2.0"));
+        assert_eq!(a.fields[0].1, "200");
+        assert_eq!(a.fields[1].1, "800");
+        assert_eq!(a.fields[2].1, "50");
+
+        // mostly patched → WARNING band, then INFO when nearly complete
+        r.versions = HashMap::from([("xrpld-3.2.1".into(), 850), ("xrpld-3.2.0".into(), 150)]);
+        assert_eq!(evaluate_adoption(&r, (3, 2, 1)).severity, Severity::Warning);
+        r.versions = HashMap::from([("xrpld-3.2.1".into(), 950), ("xrpld-3.2.0".into(), 50)]);
+        let done = evaluate_adoption(&r, (3, 2, 1));
+        assert_eq!(done.severity, Severity::Info);
+        // movement changes the dedup key → posts immediately
+        assert_ne!(done.key, "3.2.1@20");
+        assert_eq!(done.key, "3.2.1@95");
+    }
+
+    #[test]
+    fn adoption_handles_no_core_nodes() {
+        let mut r = rpt(10, 0, 0, 0);
+        r.versions = HashMap::from([("Hubster/1.0.0".into(), 10)]);
+        let a = evaluate_adoption(&r, (3, 2, 1));
+        assert_eq!(a.severity, Severity::Info);
+        assert_eq!(a.key, "3.2.1@0");
     }
 
     #[test]

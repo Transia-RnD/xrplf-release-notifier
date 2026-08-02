@@ -1,0 +1,14 @@
+[Unit]
+Description=xrpl-crawler unl-adoption — XRPL mainnet UNL hotfix-adoption tracking
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=observatory
+EnvironmentFile=/etc/observatory.env
+ExecStart=/opt/observatory/bin/xrpl-crawler unl-adoption \
+  --min-safe-version 3.2.1 \
+  $MONITOR_FLAGS \
+  --webhook-state /var/lib/observatory/unl-adoption-alert-state.json
+StateDirectory=observatory

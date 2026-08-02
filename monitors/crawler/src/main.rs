@@ -6,6 +6,7 @@ mod names;
 mod nunl;
 mod report;
 mod types;
+mod unl_adoption;
 mod version;
 mod webhook;
 
@@ -57,6 +58,12 @@ enum Command {
         /// Write a machine-readable report + evaluate snapshot rules against it
         #[arg(long)]
         report_json: Option<String>,
+
+        /// Post a PATCH_ADOPTION status card: share of core nodes at/above this
+        /// version, e.g. a hotfix like 3.2.1 (needs --report-json; posts on
+        /// movement, else every 12h)
+        #[arg(long)]
+        min_safe_version: Option<String>,
 
         /// Mattermost webhook URL for alerts
         #[arg(long)]
@@ -176,6 +183,30 @@ enum Command {
         #[arg(long, default_value = crate::names::DEFAULT_NAMES_URL)]
         names_url: Option<String>,
     },
+    /// Report XRPL mainnet UNL software-version adoption after a hotfix (polls
+    /// data.xrpl.org, which resolves each validator's server_version)
+    UnlAdoption {
+        /// Post the adoption card for the share of UNL validators at/above this
+        /// hotfix version, e.g. 3.2.1
+        #[arg(long, default_value = "3.2.1")]
+        min_safe_version: String,
+
+        /// Validator feed URL (master_key → server_version → unl)
+        #[arg(long, default_value = crate::unl_adoption::DEFAULT_FEED)]
+        feed_url: String,
+
+        /// Mattermost webhook URL for alerts
+        #[arg(long)]
+        webhook: Option<String>,
+
+        /// Alert dedup state file (posts on movement, else 12h heartbeat)
+        #[arg(long)]
+        webhook_state: Option<String>,
+
+        /// Evaluate and print the card without posting
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Generate xrpld [ips_fixed] config from crawl results
     GenConfig {
         /// Crawl state file
@@ -201,6 +232,7 @@ async fn main() -> Result<()> {
             resume,
             output,
             report_json,
+            min_safe_version,
             webhook,
             webhook_state,
             dry_run,
@@ -213,6 +245,7 @@ async fn main() -> Result<()> {
                 resume,
                 &output,
                 report_json.as_deref(),
+                min_safe_version.as_deref(),
                 webhook,
                 webhook_state,
                 dry_run,
@@ -276,6 +309,22 @@ async fn main() -> Result<()> {
                 dry_run,
                 names_file,
                 names_url,
+            )
+            .await
+        }
+        Command::UnlAdoption {
+            min_safe_version,
+            feed_url,
+            webhook,
+            webhook_state,
+            dry_run,
+        } => {
+            unl_adoption::run(
+                &feed_url,
+                &min_safe_version,
+                webhook,
+                webhook_state,
+                dry_run,
             )
             .await
         }
