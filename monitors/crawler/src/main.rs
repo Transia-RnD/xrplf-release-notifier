@@ -1,9 +1,11 @@
 mod amendments;
 mod crawl;
+mod crosscheck;
 mod detect;
 mod monitor;
 mod names;
 mod nunl;
+mod sources;
 mod report;
 mod types;
 mod unl_adoption;
@@ -130,6 +132,19 @@ enum Command {
         /// Live key→name source (XRPLF/unl raw yaml); refreshed hourly
         #[arg(long, default_value = crate::names::DEFAULT_NAMES_URL)]
         names_url: Option<String>,
+
+        /// Independent validation store used to cross-check LOW_QUORUM before
+        /// posting (xPOP Validation-Ledger-Tx-Store base URL including the
+        /// network id path). Empty string disables the cross-check.
+        #[arg(long, default_value = crate::crosscheck::DEFAULT_VANTAGE_URL)]
+        crosscheck_url: String,
+
+        /// Public JSON-RPC nodes used to confirm CHAIN_STALL before posting,
+        /// comma-separated and tried in order (cluster first by default): if
+        /// one serves a validated ledger past our feed, the stall is ours
+        /// (WARNING FEED_STALL), not the network's. Empty string disables.
+        #[arg(long, default_value = crate::crosscheck::DEFAULT_RPC_URLS)]
+        rpc_check_url: String,
     },
     /// Track network-wide amendment majority/activation via public ledger_entry
     Amendments {
@@ -267,6 +282,8 @@ async fn main() -> Result<()> {
             min_version,
             names_file,
             names_url,
+            crosscheck_url,
+            rpc_check_url,
         } => {
             monitor::run(
                 endpoints,
@@ -282,6 +299,8 @@ async fn main() -> Result<()> {
                 min_version,
                 names_file,
                 names_url,
+                crosscheck_url,
+                rpc_check_url,
             )
             .await
         }

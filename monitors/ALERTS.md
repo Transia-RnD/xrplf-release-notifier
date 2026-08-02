@@ -29,13 +29,22 @@ absolute security rules still fire.
 Subscribes to `validations` streams and runs the detection engine. Alerts post
 with 24h hysteresis (a persistent condition re-fires at most daily).
 
+Public hubs relay validations from other chains (devnet/testnet-family). The
+engine anchors on the highest ledger seq signed by a trusted UNL key — UNL keys
+only sign mainnet — and drops non-UNL validations more than 5,000 ledgers from
+that anchor, so foreign ledgers (which naturally carry 0 UNL validations) never
+reach the quorum/fork detectors.
+
 | Alert | Severity | Fires when | Dedup |
 |-------|----------|-----------|-------|
 | `FORK_DETECTED` | CRITICAL | Conflicting ledger hashes where **no branch reached quorum** (a genuine split, not a lone straggler) | per ledger, 24h |
 | `MINI_FORK` | WARNING/CRITICAL | The same validators persistently validate a **minority branch** across many ledgers — a partitioned / private-peer cluster, even while the main network keeps quorum | per episode, 24h |
 | `EQUIVOCATION` | CRITICAL | A validator signed **two different hashes for the same ledger** — unambiguous Byzantine behavior / key compromise (zero-false-positive signal) | per (validator, ledger) |
-| `LOW_QUORUM` | WARNING/CRITICAL | Fewer validators than the expected minimum agreed a ledger | per ledger, 24h |
-| `CHAIN_STALL` | CRITICAL | No ledger progress for the stall window | per ledger, 24h |
+| `LOW_QUORUM` | WARNING/CRITICAL | Fewer validators than the expected minimum agreed a ledger. Cross-checked against an independent validation store (xrplwin xPOP, `--crosscheck-url`) before posting: **confirmed there → CRITICAL**; store unreachable → downgraded to WARNING (unconfirmable ≠ confirmed) | per ledger, 24h |
+| `RELAY_GAP` | WARNING | Our feed saw below-quorum validations for a ledger, but the missing validations **exist at the independent store** — the network had quorum; relays were lost upstream of our sources | per ledger, 24h |
+| `VANTAGE_LOSS` | WARNING | One subscribed endpoint delivered ≥5 fewer UNL validations for a finalized ledger than the union of the other endpoints — live-measured relay loss at that vantage (no third-party store involved) | per source, 24h |
+| `CHAIN_STALL` | WARNING/CRITICAL | No ledger progress for the stall window. Confirmed against a public RPC node (`--rpc-check-url`) before posting: **the vantage also has no newer validated ledger → CRITICAL**; vantage unreachable → WARNING (unconfirmed) | once, 24h |
+| `FEED_STALL` | WARNING | Our validation feed stalled but the public RPC vantage shows the network advancing — a vantage problem, not a chain stall | once, 24h |
 | `VALIDATORS_SILENT` | WARNING/CRITICAL | UNL validators missing to within 1 of losing quorum (not routine stragglers) | per gap, 24h |
 
 ## crawler `crawl` — topology snapshot (hourly, observatory VM)

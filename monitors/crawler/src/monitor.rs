@@ -1,5 +1,7 @@
+use crate::crosscheck::{self, Verdict};
 use crate::detect::{self, Alert, DetectionEngine};
 use crate::names;
+use crate::sources::SourceTracker;
 use crate::types::CrawlState;
 use crate::version::{self, Version};
 use crate::webhook::AlertSink;
@@ -161,6 +163,157 @@ async fn stream_validations(
     Ok(())
 }
 
+/// Cross-check a LOW_QUORUM verdict against an independent validation store
+/// before emitting. Our only vantage is Ripple's s1/s2 streams, which have
+/// been observed to lose a cohort of relays for one ledger under tx-burst
+/// load; the store tells us whether the "missing" validations exist anywhere.
+/// Vantage has them → recategorize as RELAY_GAP (network quorum was fine, the
+/// relays were lost upstream of our feed). Vantage is short too → escalate to
+/// CRITICAL: two independent vantages agree the ledger lacked quorum.
+async fn crosscheck_low_quorum(alert: &mut Alert, base_url: &str) {
+    if alert.category != "LOW_QUORUM" {
+        return;
+    }
+    let d = &alert.details;
+    let Some(seq) = d.get("ledger_index").and_then(|v| v.as_u64()) else {
+        return;
+    };
+    let unl_count = d.get("unl_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let unl_size = d.get("unl_size").and_then(|v| v.as_u64()).unwrap_or(0);
+    let min_required = d.get("min_required").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let missing: Vec<String> = d
+        .get("missing_validator_keys")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|k| k.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Give the store a moment to persist validations that are still in flight
+    // for a just-finalized ledger, then read its view of that ledger.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    match crosscheck::fetch_master_keys(base_url, seq).await {
+        Err(e) => {
+            eprintln!("[{}] crosscheck unavailable for ledger {}: {}", ts(), seq, e);
+            // Unconfirmable ≠ confirmed: only a vantage-confirmed quorum loss
+            // pages CRITICAL. A single-vantage verdict stays a WARNING.
+            if alert.severity == "CRITICAL" {
+                alert.severity = "WARNING";
+                alert.message = format!("{} — unconfirmed (crosscheck vantage unreachable)", alert.message);
+            }
+            if let Some(obj) = alert.details.as_object_mut() {
+                obj.insert(
+                    "crosscheck".into(),
+                    serde_json::json!({ "vantage": base_url, "error": e.to_string() }),
+                );
+            }
+        }
+        Ok(vantage) => {
+            let recovered: Vec<&String> =
+                missing.iter().filter(|k| vantage.contains(*k)).collect();
+            match crosscheck::verdict(unl_count, min_required, recovered.len()) {
+                Verdict::VantageGap {
+                    recovered: r,
+                    effective,
+                } => {
+                    alert.category = "RELAY_GAP";
+                    // The network had quorum — only our feed lost relays. That is
+                    // a vantage problem, not a network emergency (ALERTS.md).
+                    alert.severity = "WARNING";
+                    alert.message = format!(
+                        "Ledger {} has {}/{} UNL validations on our feed, but {} of the missing exist at the independent xPOP vantage ({}/{} network-wide) — validations lost upstream of our sources, network quorum OK",
+                        seq, unl_count, unl_size, r, effective, unl_size
+                    );
+                }
+                Verdict::Confirmed { effective, .. } => {
+                    alert.severity = "CRITICAL";
+                    alert.message = format!(
+                        "{} — CONFIRMED at independent xPOP vantage: only {}/{} UNL validations network-wide",
+                        alert.message, effective, unl_size
+                    );
+                }
+            }
+            if let Some(obj) = alert.details.as_object_mut() {
+                obj.insert(
+                    "crosscheck".into(),
+                    serde_json::json!({
+                        "vantage": base_url,
+                        "vantage_stored": vantage.len(),
+                        "recovered_validator_keys": recovered,
+                    }),
+                );
+            }
+        }
+    }
+}
+
+/// Apply the public-RPC verdict to a CHAIN_STALL alert. Only a stall the RPC
+/// vantage agrees with (it cannot serve a ledger past our feed's last seq)
+/// stays CRITICAL; an advancing network means the stall is our feed's, and an
+/// unreachable vantage means unconfirmed — both are WARNINGs.
+fn apply_stall_verdict(alert: &mut Alert, ours: u64, vantage: &anyhow::Result<u64>) {
+    match vantage {
+        Ok(seq) if *seq > ours => {
+            alert.category = "FEED_STALL";
+            alert.severity = "WARNING";
+            alert.message = format!(
+                "Our validation feed stalled at seq {}, but public RPC reports validated ledger {} — the network is advancing; vantage problem, not a chain stall",
+                ours, seq
+            );
+        }
+        Ok(seq) => {
+            alert.severity = "CRITICAL";
+            alert.message = format!(
+                "{} — CONFIRMED: public RPC also has no ledger past {} (validated: {})",
+                alert.message, ours, seq
+            );
+        }
+        Err(_) => {
+            alert.severity = "WARNING";
+            alert.message = format!(
+                "{} — unconfirmed (public RPC vantage unreachable)",
+                alert.message
+            );
+        }
+    }
+}
+
+/// Cross-check a CHAIN_STALL verdict against public JSON-RPC nodes (tried in
+/// order, cluster first) before emitting: our feed going quiet is not proof
+/// the network stopped.
+async fn crosscheck_chain_stall(alert: &mut Alert, rpc_urls: &[String]) {
+    if alert.category != "CHAIN_STALL" {
+        return;
+    }
+    let ours = alert
+        .details
+        .get("last_seq")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let mut vantage: anyhow::Result<u64> = Err(anyhow!("no RPC vantage configured"));
+    let mut used: &str = "";
+    for url in rpc_urls {
+        vantage = crosscheck::fetch_validated_seq(url).await;
+        used = url;
+        match &vantage {
+            Ok(_) => break,
+            Err(e) => eprintln!("[{}] stall crosscheck {} failed: {}", ts(), url, e),
+        }
+    }
+    apply_stall_verdict(alert, ours, &vantage);
+    if let Some(obj) = alert.details.as_object_mut() {
+        obj.insert(
+            "crosscheck".into(),
+            match &vantage {
+                Ok(seq) => serde_json::json!({ "vantage": used, "validated_seq": seq }),
+                Err(e) => serde_json::json!({ "vantage": used, "error": e.to_string() }),
+            },
+        );
+    }
+}
+
 fn emit_alert(alert: &Alert, alert_file: &mut std::fs::File, sink: &mut AlertSink) {
     let prefix = match alert.severity {
         "CRITICAL" => "!!!!! CRITICAL",
@@ -214,8 +367,30 @@ pub async fn run(
     min_version: Option<String>,
     names_file: Option<String>,
     names_url: Option<String>,
+    crosscheck_url: String,
+    rpc_check_url: String,
 ) -> Result<()> {
     let mut sink = AlertSink::new(webhook, dry_run, webhook_state, "xrpl-crawler/monitor");
+    let crosscheck_url = crosscheck_url.trim().trim_end_matches('/').to_string();
+    if crosscheck_url.is_empty() {
+        eprintln!("[{}] LOW_QUORUM crosscheck disabled", ts());
+    } else {
+        eprintln!("[{}] LOW_QUORUM crosscheck vantage: {}", ts(), crosscheck_url);
+    }
+    let rpc_check_urls: Vec<String> = rpc_check_url
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if rpc_check_urls.is_empty() {
+        eprintln!("[{}] CHAIN_STALL crosscheck disabled", ts());
+    } else {
+        eprintln!(
+            "[{}] CHAIN_STALL crosscheck vantages (in order): {}",
+            ts(),
+            rpc_check_urls.join(", ")
+        );
+    }
     let suspicious = load_suspicious_pubkeys(state_file);
     // Post-hotfix upgrade adoption: decode each validator's server_version and
     // alert when validators lag below --min-version.
@@ -227,6 +402,9 @@ pub async fn run(
         Some(path) => detect::load_unl_file(path),
         None => HashSet::new(),
     };
+    // Per-endpoint accounting: compares which UNL validators each source
+    // delivered per ledger, catching a vantage that loses relays live.
+    let mut source_tracker = SourceTracker::new(unl_keys.clone());
     let mut engine = DetectionEngine::new(unl_keys, min_validators);
     // Resolve validator names live from XRPLF/unl (fallback: shipped file), then
     // refresh hourly so names stay current as the UNL changes.
@@ -244,16 +422,28 @@ pub async fn run(
         let tx = tx.clone();
         let running = running.clone();
         tokio::spawn(async move {
+            // Exponential backoff (5s..60s) for endpoints that fail fast —
+            // e.g. one whose DNS/TLS isn't provisioned yet — so a dead
+            // endpoint doesn't spam the journal every 5s. A connection that
+            // survived >60s resets the backoff.
+            let mut fails: u32 = 0;
             loop {
                 if !running.load(Ordering::Relaxed) {
                     return;
                 }
+                let started = std::time::Instant::now();
                 if let Err(e) = stream_validations(&ep, &tx, &running).await {
                     if !running.load(Ordering::Relaxed) {
                         return;
                     }
-                    eprintln!("[{}] [{}] {}, reconnecting in 5s", ts(), ep, e);
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    if started.elapsed() > Duration::from_secs(60) {
+                        fails = 0;
+                    } else {
+                        fails = (fails + 1).min(4);
+                    }
+                    let backoff = (5u64 << fails).min(60);
+                    eprintln!("[{}] [{}] {}, reconnecting in {}s", ts(), ep, e, backoff);
+                    tokio::time::sleep(Duration::from_secs(backoff)).await;
                 }
             }
         });
@@ -273,10 +463,17 @@ pub async fn run(
     let mut seen: HashSet<String> = HashSet::new();
     let mut seen_suspicious: HashSet<String> = HashSet::new();
 
+    // Validations delivered per source since the last summary line. Makes a
+    // feed collapse attributable at a glance (which endpoint went quiet vs
+    // "did we get rate limited"), which alert counts alone can't show.
+    let source_counts: Arc<std::sync::Mutex<HashMap<String, u64>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
+
     let summary_total = total.clone();
     let summary_sus = sus_count.clone();
     let summary_alerts = alert_count.clone();
     let summary_running = running.clone();
+    let summary_sources = source_counts.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
@@ -284,12 +481,28 @@ pub async fn run(
             if !summary_running.load(Ordering::Relaxed) {
                 return;
             }
+            let per_source = {
+                let mut counts = summary_sources.lock().expect("source counts lock");
+                let mut rates: Vec<String> = counts
+                    .iter()
+                    .map(|(src, n)| {
+                        let short = src
+                            .trim_start_matches("wss://")
+                            .trim_start_matches("ws://");
+                        format!("{short}={n}/min")
+                    })
+                    .collect();
+                counts.clear();
+                rates.sort();
+                rates.join(" ")
+            };
             eprintln!(
-                "[{}] -- total: {} | suspicious: {} | alerts: {} --",
+                "[{}] -- total: {} | suspicious: {} | alerts: {} | {} --",
                 ts(),
                 summary_total.load(Ordering::Relaxed),
                 summary_sus.load(Ordering::Relaxed),
                 summary_alerts.load(Ordering::Relaxed),
+                per_source,
             );
         }
     });
@@ -312,7 +525,17 @@ pub async fn run(
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
-                for alert in &engine.tick() {
+                for mut alert in engine.tick() {
+                    alert_count.fetch_add(1, Ordering::Relaxed);
+                    if !crosscheck_url.is_empty() {
+                        crosscheck_low_quorum(&mut alert, &crosscheck_url).await;
+                    }
+                    if !rpc_check_urls.is_empty() {
+                        crosscheck_chain_stall(&mut alert, &rpc_check_urls).await;
+                    }
+                    emit_alert(&alert, &mut alert_file, &mut sink);
+                }
+                for alert in &source_tracker.tick() {
                     alert_count.fetch_add(1, Ordering::Relaxed);
                     emit_alert(alert, &mut alert_file, &mut sink);
                 }
@@ -333,6 +556,18 @@ pub async fn run(
                     Some(v) => v,
                     None => break,
                 };
+                // Per-source accounting must see EVERY sighting — the
+                // cross-endpoint dedup below keeps only the first source.
+                *source_counts
+                    .lock()
+                    .expect("source counts lock")
+                    .entry(v.source.clone())
+                    .or_insert(0) += 1;
+                let seq: u64 = v.ledger_index.parse().unwrap_or(0);
+                if seq > min_seq {
+                    source_tracker.record(&v.source, v.master_key.as_deref(), seq);
+                }
+
                 let dedup_key = format!("{}:{}", v.pk, v.ledger_index);
                 if !seen.insert(dedup_key) {
                     continue;
@@ -402,17 +637,24 @@ pub async fn run(
                     }
                 }
 
-                // Feed into detection engine (skip other networks)
-                let seq: u64 = v.ledger_index.parse().unwrap_or(0);
-                if seq > min_seq {
+                // Feed into detection engine. Partial validations (full=false)
+                // don't count toward quorum in rippled either — a syncing or
+                // amendment-blocked validator must not open/poison a window.
+                if seq > min_seq && v.full {
                     let alerts = engine.process_validation(
                         v.master_key.as_deref(),
                         &v.ledger_hash,
                         seq,
                     );
-                    for alert in &alerts {
+                    for mut alert in alerts {
                         alert_count.fetch_add(1, Ordering::Relaxed);
-                        emit_alert(alert, &mut alert_file, &mut sink);
+                        if !crosscheck_url.is_empty() {
+                            crosscheck_low_quorum(&mut alert, &crosscheck_url).await;
+                        }
+                        if !rpc_check_urls.is_empty() {
+                            crosscheck_chain_stall(&mut alert, &rpc_check_urls).await;
+                        }
+                        emit_alert(&alert, &mut alert_file, &mut sink);
                     }
                 }
             }
@@ -433,4 +675,47 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::anyhow;
+
+    fn stall_alert() -> Alert {
+        Alert {
+            ts: String::new(),
+            severity: "CRITICAL",
+            category: "CHAIN_STALL",
+            message: "No new validated ledger for 20s (last seq: 100)".into(),
+            ledger_seq: None,
+            details: serde_json::json!({ "last_seq": 100 }),
+        }
+    }
+
+    #[test]
+    fn stall_downgrades_when_network_advances() {
+        let mut a = stall_alert();
+        apply_stall_verdict(&mut a, 100, &Ok(105));
+        assert_eq!(a.category, "FEED_STALL");
+        assert_eq!(a.severity, "WARNING");
+    }
+
+    #[test]
+    fn stall_confirmed_when_vantage_stuck_too() {
+        let mut a = stall_alert();
+        apply_stall_verdict(&mut a, 100, &Ok(100));
+        assert_eq!(a.category, "CHAIN_STALL");
+        assert_eq!(a.severity, "CRITICAL");
+        assert!(a.message.contains("CONFIRMED"));
+    }
+
+    #[test]
+    fn stall_unconfirmed_when_vantage_unreachable() {
+        let mut a = stall_alert();
+        apply_stall_verdict(&mut a, 100, &Err(anyhow!("timeout")));
+        assert_eq!(a.category, "CHAIN_STALL");
+        assert_eq!(a.severity, "WARNING");
+        assert!(a.message.contains("unconfirmed"));
+    }
 }

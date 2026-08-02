@@ -15,6 +15,16 @@ const MINI_FORK_WINDOW: u64 = 64;
 /// MINI_FORK_WINDOW ledgers is persistently diverging (honest validators agree
 /// ~100% of the time), so a stable set of these is a partition signal.
 const MINI_FORK_MIN: usize = 8;
+/// Public hubs relay validations from other chains (devnet/testnet-family),
+/// whose ledger seqs sit nowhere near mainnet's. A non-UNL validation more than
+/// this many ledgers from the UNL anchor is another network's ledger. Mainnet
+/// closes ~21,600 ledgers/day, so 5,000 tolerates hours of anchor staleness.
+const FOREIGN_CHAIN_SLACK: u64 = 5_000;
+/// A validation this far behind the tip is a lagging node replaying history
+/// (observed live: a tracking node re-validating ledgers ~4,700 behind). It
+/// must not open a quorum window — the tip-time validations it would be judged
+/// against are long gone, so the window could only ever read as low-quorum.
+const STALE_LEDGER_SLACK: u64 = 256;
 
 fn ts() -> String {
     chrono::Utc::now().format("%H:%M:%S").to_string()
@@ -76,6 +86,11 @@ pub struct DetectionEngine {
     // or escalates WARNING→CRITICAL re-fires instead of latching on the first hit.
     mini_fork_last: Option<(&'static str, usize)>,
 
+    // Highest ledger seq validated by a trusted UNL key. UNL keys only sign
+    // mainnet, so this anchors which chain "the chain" is (see FOREIGN_CHAIN_SLACK).
+    unl_anchor_seq: u64,
+    dropped_foreign: u64,
+    dropped_stale: u64,
     highest_seq: u64,
     last_seq_advance: Instant,
     chain_stalled: bool,
@@ -119,6 +134,9 @@ impl DetectionEngine {
             validator_last_seen: HashMap::new(),
             minority_divergence: HashMap::new(),
             mini_fork_last: None,
+            unl_anchor_seq: 0,
+            dropped_foreign: 0,
+            dropped_stale: 0,
             highest_seq: 0,
             last_seq_advance: now,
             chain_stalled: false,
@@ -152,6 +170,48 @@ impl DetectionEngine {
             Some(k) if !k.is_empty() => k.to_string(),
             _ => return alerts,
         };
+
+        // Foreign-chain guard: a non-UNL validation far from the UNL anchor is
+        // another network's ledger relayed by a public hub — it must not open a
+        // window, advance highest_seq, or be quorum-judged.
+        let is_unl = self.unl_keys.contains(&mk);
+        if is_unl {
+            if ledger_index > self.unl_anchor_seq {
+                self.unl_anchor_seq = ledger_index;
+            }
+        } else if self.unl_anchor_seq > 0
+            && ledger_index.abs_diff(self.unl_anchor_seq) > FOREIGN_CHAIN_SLACK
+        {
+            self.dropped_foreign += 1;
+            if self.dropped_foreign == 1 || self.dropped_foreign.is_multiple_of(500) {
+                eprintln!(
+                    "[{}] dropping foreign-chain validation: seq {} vs UNL anchor {} ({} dropped so far)",
+                    ts(),
+                    ledger_index,
+                    self.unl_anchor_seq,
+                    self.dropped_foreign
+                );
+            }
+            return alerts;
+        }
+
+        // Stale-ledger guard: a validation far behind the tip is a lagging node
+        // replaying history — it must not open a quorum window, and does not
+        // count as tip-liveness for silence detection.
+        if self.highest_seq > 0 && ledger_index + STALE_LEDGER_SLACK < self.highest_seq {
+            self.dropped_stale += 1;
+            if self.dropped_stale == 1 || self.dropped_stale.is_multiple_of(500) {
+                eprintln!(
+                    "[{}] dropping stale validation: seq {} is {} behind tip {} ({} dropped so far)",
+                    ts(),
+                    ledger_index,
+                    self.highest_seq - ledger_index,
+                    self.highest_seq,
+                    self.dropped_stale
+                );
+            }
+            return alerts;
+        }
 
         let now = Instant::now();
         let warmed_up = now.duration_since(self.started_at).as_secs() > self.warmup_secs;
@@ -198,7 +258,6 @@ impl DetectionEngine {
 
         alerts.extend(self.check_stall(now));
 
-        let is_unl = self.unl_keys.contains(&mk);
         let window = self
             .ledgers
             .entry(ledger_index)
@@ -283,7 +342,10 @@ impl DetectionEngine {
                     "No new validated ledger for {}s (last seq: {}) — chain may be stalled",
                     secs_since_advance, self.highest_seq
                 ),
-                ledger_seq: Some(self.highest_seq),
+                // Stable category-level latch key (ledger_seq -> None): a flapping
+                // feed that stalls/resumes repeatedly dedups to once/24h instead
+                // of posting a fresh CRITICAL per episode.
+                ledger_seq: None,
                 details: serde_json::json!({
                     "seconds_since_advance": secs_since_advance,
                     "last_seq": self.highest_seq,
@@ -528,6 +590,7 @@ impl DetectionEngine {
                                 "unl_size": self.unl_keys.len(),
                                 "min_required": self.min_validators,
                                 "missing_validators": labels(&self.names, &missing),
+                                "missing_validator_keys": missing,
                             }),
                         });
                     }
@@ -643,11 +706,13 @@ impl DetectionEngine {
         };
 
         format!(
-            "seq={} | windows={} | active_unl={}/{}",
+            "seq={} | windows={} | active_unl={}/{} | dropped_foreign={} | dropped_stale={}",
             self.highest_seq,
             self.ledgers.len(),
             active_unl,
             self.unl_keys.len(),
+            self.dropped_foreign,
+            self.dropped_stale,
         )
     }
 }
@@ -693,6 +758,10 @@ impl DetectionEngine {
         self.last_seq_advance = Instant::now() - d;
         self.last_stall_check = Instant::now() - d;
     }
+
+    fn has_window(&self, seq: u64) -> bool {
+        self.ledgers.contains_key(&seq)
+    }
 }
 
 #[cfg(test)]
@@ -737,9 +806,62 @@ mod tests {
         e.process_validation(Some("VAL1"), "HASH_A", 500);
         e.backdate_advance(3600);
         let a = e.tick();
-        assert!(a
-            .iter()
-            .any(|x| x.category == "CHAIN_STALL" && x.severity == "CRITICAL"));
+        // ledger_seq must be None: the stable latch key keeps a flapping feed
+        // from posting a fresh CRITICAL per stall episode.
+        assert!(a.iter().any(|x| x.category == "CHAIN_STALL"
+            && x.severity == "CRITICAL"
+            && x.ledger_seq.is_none()));
+    }
+
+    // Public hubs relay validations from other chains; a non-UNL validation whose
+    // seq is nowhere near the UNL anchor must be dropped before it opens a window
+    // (the 2026-08-02 incident: foreign ledgers 55153/4155533/19582133 each fired
+    // a CRITICAL LOW_QUORUM because they naturally carry 0/35 UNL validations).
+    #[test]
+    fn foreign_chain_validations_ignored() {
+        let mut e = DetectionEngine::new(unl(&["VAL1", "VAL2"]), Some(2));
+        e.force_warmup();
+        e.process_validation(Some("VAL1"), "HASH_A", 106_000_000);
+        e.process_validation(Some("VAL2"), "HASH_A", 106_000_000);
+        // Foreign-chain ledger from a non-UNL key: no alert, no window.
+        let a = e.process_validation(Some("FOREIGN1"), "HASH_F", 55_153);
+        assert!(a.is_empty());
+        assert!(!e.has_window(55_153));
+        // A non-UNL validator near the anchor is mainnet and still tracked.
+        e.process_validation(Some("OTHER1"), "HASH_A", 106_000_001);
+        assert!(e.has_window(106_000_001));
+        // UNL validations always pass — they define the anchor.
+        e.process_validation(Some("VAL1"), "HASH_A", 106_000_002);
+        assert!(e.has_window(106_000_002));
+    }
+
+    // A lagging node replaying old ledgers (observed live: a tracker
+    // re-validating a ledger ~4,700 behind the tip — inside the foreign-chain
+    // slack) must not open a quorum window it can never fill.
+    #[test]
+    fn stale_ledger_validations_ignored() {
+        let mut e = DetectionEngine::new(unl(&["VAL1"]), Some(1));
+        e.force_warmup();
+        e.process_validation(Some("VAL1"), "HASH_A", 106_000_000);
+        // Non-UNL node replaying a ledger 4,700 behind the tip.
+        e.process_validation(Some("OTHER1"), "HASH_B", 105_995_300);
+        assert!(!e.has_window(105_995_300));
+        // Even a UNL validator replaying history must not open a window.
+        e.process_validation(Some("VAL1"), "HASH_C", 105_999_000);
+        assert!(!e.has_window(105_999_000));
+        // A ledger just behind the tip (normal in-flight window) still opens.
+        e.process_validation(Some("OTHER2"), "HASH_A", 105_999_990);
+        assert!(e.has_window(105_999_990));
+    }
+
+    // Before any UNL validation establishes the anchor (or with no UNL at all),
+    // nothing is filtered — the engine behaves as before.
+    #[test]
+    fn no_anchor_means_no_filtering() {
+        let mut e = DetectionEngine::new(unl(&["VAL1"]), Some(1));
+        e.force_warmup();
+        e.process_validation(Some("OTHER1"), "HASH_A", 55_153);
+        assert!(e.has_window(55_153));
     }
 
     // S9: a monitor that has only ever seen a handful of UNL validators (sparse
