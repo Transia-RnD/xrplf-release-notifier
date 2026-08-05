@@ -14,6 +14,8 @@
  *     -> FULL parity: every tx + ledger type at 3.1.3 checked against each SDK
  *        (catches backlog, not just this release's delta). Use a final tag, or
  *        `develop` for the bleeding-edge main-branch picture.
+ *   npx ts-node scripts/run-parity.ts 3.2.0 --dry --docs-only
+ *     -> only the xrpl.org docs-parity check (deterministic, no Anthropic call).
  *
  * Requires ANTHROPIC_API_KEY, GITHUB_TOKEN, and MATTERMOST_WEBHOOK_URL in .env.
  */
@@ -29,12 +31,13 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2)
   const fullMode = args.includes('--full')
   const dryRun = args.includes('--dry')
+  const docsOnly = args.includes('--docs-only')
   const positional = args.filter((a) => !a.startsWith('--'))
   const tag = positional[0]
   const predecessorTag = fullMode ? undefined : positional[1]
   if (!tag) {
     console.error(
-      'usage: run-parity.ts <tag> [predecessorTag] [--full] [--dry]'
+      'usage: run-parity.ts <tag> [predecessorTag] [--full] [--dry] [--docs-only]'
     )
     process.exit(1)
   }
@@ -65,30 +68,36 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `Running ${fullMode ? 'FULL' : 'delta'} parity for ${tag}` +
+    `Running ${fullMode ? 'FULL' : 'delta'} parity${docsOnly ? ' (docs only)' : ''} for ${tag}` +
       `${predecessorTag ? ` (predecessor ${predecessorTag})` : ''}` +
       `${dryRun ? ' — DRY RUN (no post)' : ' — will POST to Mattermost'}…`
   )
-  const payload = await runParityCheck(
+  const payloads = await runParityCheck(
     version,
     { config, storage, logger },
-    { predecessorTag, mode: fullMode ? 'full' : 'delta', dryRun }
+    { predecessorTag, mode: fullMode ? 'full' : 'delta', dryRun, docsOnly }
   )
 
   if (dryRun) {
-    const att = payload?.attachments?.[0]
-    console.log('\n' + '═'.repeat(80))
-    console.log('  MATTERMOST PARITY REPORT (DRY RUN — not posted)')
-    console.log('═'.repeat(80))
-    console.log(`  Color:   ${att?.color ?? '(none)'}`)
-    console.log(`  Pretext: ${att?.pretext ?? '(none)'}`)
-    if (att?.text) {
-      console.log('  Body:')
-      att.text.split('\n').forEach((l) => console.log(`    ${l}`))
+    for (const [label, payload] of [
+      ['SDK PARITY', payloads?.sdk],
+      ['DOCS PARITY', payloads?.docs],
+    ] as const) {
+      if (!payload) continue
+      const att = payload.attachments?.[0]
+      console.log('\n' + '═'.repeat(80))
+      console.log(`  MATTERMOST ${label} REPORT (DRY RUN — not posted)`)
+      console.log('═'.repeat(80))
+      console.log(`  Color:   ${att?.color ?? '(none)'}`)
+      console.log(`  Pretext: ${att?.pretext ?? '(none)'}`)
+      if (att?.text) {
+        console.log('  Body:')
+        att.text.split('\n').forEach((l) => console.log(`    ${l}`))
+      }
+      console.log('═'.repeat(80) + '\n')
     }
-    console.log('═'.repeat(80) + '\n')
   } else {
-    console.log('Done — report posted to Mattermost.')
+    console.log('Done — report(s) posted to Mattermost.')
   }
 }
 

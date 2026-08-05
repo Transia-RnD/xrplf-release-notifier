@@ -17,3 +17,10 @@ sdks:
   - { name: xrpl4j,    repo: XRPLF/xrpl4j,    ref: main }
   - { name: xrpl-rust, repo: XRPLF/xrpl-rust, ref: main }
   - { name: xrpl-go,   repo: XRPLF/xrpl-go,   ref: main }
+
+# Where xrpl.org is sourced/published from — the documentation-parity target.
+# Page-path conventions (types/<lower>.md, sidebars.yaml nav, known-amendments.md
+# entry format) are hard invariants encoded in src/parity/docs.ts.
+docs:
+  repo: XRPLF/xrpl-dev-portal
+  ref: master

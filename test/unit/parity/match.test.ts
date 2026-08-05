@@ -108,14 +108,18 @@ describe('attachInProgressPRs', () => {
     expect(features[0].inProgressPR).toBeUndefined()
   })
 
-  it('skips the PR lookup entirely when every feature is supported', async () => {
+  it('skips the PR lookup entirely when the gap list is empty', async () => {
     const spy = jest.spyOn(client, 'listPullRequests')
     const features = computeVerdicts(
       [{ name: 'Payment', kind: 'transactionType' }],
       inv({ typedTransactionTypes: ['Payment'] }),
       DEFS
     )
-    await attachInProgressPRs('r', features, 't')
+    await attachInProgressPRs(
+      'r',
+      features.filter((f) => f.level2 !== 'supported'),
+      't'
+    )
     expect(spy).not.toHaveBeenCalled()
   })
 })

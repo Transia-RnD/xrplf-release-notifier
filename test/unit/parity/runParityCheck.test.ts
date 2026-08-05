@@ -6,6 +6,7 @@ import * as agent from '../../../src/parity/runSdkAgent'
 import type { SdkInventory } from '../../../src/parity/runSdkAgent'
 import * as client from '../../../src/github/client'
 import * as cache from '../../../src/parity/cache'
+import * as docsCheck from '../../../src/parity/runDocsCheck'
 import * as mm from '../../../src/notifications/mattermost'
 import type { AppConfig } from '../../../src/config'
 import type { VersionInfo } from '../../../src/version/types'
@@ -77,7 +78,10 @@ function mockHappyPath() {
   jest.spyOn(sdks, 'loadParityConfig').mockReturnValue({
     rippled: { repo: 'XRPLF/rippled' },
     sdks: [{ name: 'xrpl-rust', repo: 'XRPLF/xrpl-rust', ref: 'main' }],
+    docs: { repo: 'XRPLF/xrpl-dev-portal', ref: 'master' },
   })
+  // Docs parity has its own suite (runDocsCheck.test.ts) — quiet by default.
+  jest.spyOn(docsCheck, 'runDocsCheck').mockResolvedValue(null)
   jest.spyOn(reference, 'buildReference').mockResolvedValue(REF)
   jest.spyOn(agent, 'runSdkAgent').mockResolvedValue(INVENTORY)
   jest.spyOn(client, 'resolveRefSha').mockResolvedValue('sha1')
@@ -101,7 +105,7 @@ describe('runParityCheck (orchestrator, dry run)', () => {
       dryRun: true,
     })
 
-    const att = payload?.attachments?.[0]
+    const att = payload?.sdk?.attachments?.[0]
     expect(att).toBeDefined()
     // Payment is in the typed inventory => supported (not a gap); the other is
     // declared-only (in definitions.json, no typed model).
@@ -120,7 +124,7 @@ describe('runParityCheck (orchestrator, dry run)', () => {
       mode: 'full',
       dryRun: true,
     })
-    const att = payload?.attachments?.[0]
+    const att = payload?.sdk?.attachments?.[0]
     expect(att?.pretext).toContain('Full SDK parity audit')
     // Both F1, F2 present in DEFS => 2/2 fields.
     expect(att?.text).toContain('fields: 2/2 in definitions.json')
@@ -138,7 +142,7 @@ describe('runParityCheck (orchestrator, dry run)', () => {
       predecessorTag: '3.1.0',
       dryRun: true,
     })
-    expect(payload?.attachments?.[0]?.text).toContain(
+    expect(payload?.sdk?.attachments?.[0]?.text).toContain(
       'check failed: inventory timed out'
     )
   })
@@ -167,7 +171,62 @@ describe('runParityCheck (orchestrator, dry run)', () => {
       mode: 'delta',
       dryRun: true,
     })
-    expect(payload?.attachments?.[0]?.color).toBe('#9E9E9E')
+    expect(payload?.sdk?.attachments?.[0]?.color).toBe('#9E9E9E')
     expect(agent.runSdkAgent).not.toHaveBeenCalled()
+  })
+})
+
+describe('runParityCheck (docs parity integration)', () => {
+  const DOCS_PAYLOAD = {
+    username: 'docs parity',
+    attachments: [{ fallback: 'docs', color: '#4CAF50', pretext: 'docs ok' }],
+  }
+
+  it('returns the docs payload alongside the SDK report and posts both', async () => {
+    mockHappyPath()
+    jest.spyOn(docsCheck, 'runDocsCheck').mockResolvedValue(DOCS_PAYLOAD)
+    const post = jest.spyOn(mm, 'postToMattermost').mockResolvedValue()
+
+    const payload = await runParityCheck({ ...version, raw: '9.8.7' }, deps, {
+      mode: 'delta',
+      predecessorTag: '9.8.6',
+    })
+    expect(payload?.docs).toEqual(DOCS_PAYLOAD)
+    expect(post).toHaveBeenCalledTimes(2)
+    expect(docsCheck.runDocsCheck).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reference: REF,
+        mode: 'delta',
+        docs: { repo: 'XRPLF/xrpl-dev-portal', ref: 'master' },
+      })
+    )
+  })
+
+  it('docsOnly skips the SDK agents entirely but still runs the docs check', async () => {
+    mockHappyPath()
+    jest.spyOn(docsCheck, 'runDocsCheck').mockResolvedValue(DOCS_PAYLOAD)
+    const payload = await runParityCheck(version, deps, {
+      mode: 'delta',
+      predecessorTag: '3.1.0',
+      dryRun: true,
+      docsOnly: true,
+    })
+    expect(agent.runSdkAgent).not.toHaveBeenCalled()
+    expect(payload?.sdk).toBeUndefined()
+    expect(payload?.docs).toEqual(DOCS_PAYLOAD)
+  })
+
+  it('a docs-step failure never sinks the SDK report', async () => {
+    mockHappyPath()
+    jest
+      .spyOn(docsCheck, 'runDocsCheck')
+      .mockRejectedValue(new Error('portal on fire'))
+    const payload = await runParityCheck(version, deps, {
+      mode: 'delta',
+      predecessorTag: '3.1.0',
+      dryRun: true,
+    })
+    expect(payload?.sdk?.attachments?.[0]).toBeDefined()
+    expect(payload?.docs).toBeUndefined()
   })
 })

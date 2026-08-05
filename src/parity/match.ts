@@ -2,7 +2,7 @@ import type { Logger } from 'winston'
 import { listPullRequests } from '../github/client'
 import { getErrorMessage } from '../utils/error'
 import type { Feature } from './reference'
-import type { FeatureVerdict, SdkInventory } from './runSdkAgent'
+import type { FeatureVerdict, InProgressPR, SdkInventory } from './runSdkAgent'
 
 /**
  * Deterministically turns the agent's typed-transaction INVENTORY into a verdict
@@ -70,17 +70,20 @@ function bestPr(
 }
 
 /**
- * Annotate each not-yet-supported feature with the best matching open PR, so the
- * report can say "missing, but PR #N in progress". One PR-list call per SDK;
- * matches by exact wire-name, then a verb-stripped stem, in title/body/branch.
+ * Annotate each gap with the best matching open PR, so the report can say
+ * "missing, but PR #N in progress". Callers pass the gaps only (SDK: features
+ * not yet supported; docs: pages not yet documented). One PR-list call per
+ * repo; matches by exact wire-name, then a verb-stripped stem, in
+ * title/body/branch.
  */
-export async function attachInProgressPRs(
+export async function attachInProgressPRs<
+  T extends { name: string; inProgressPR?: InProgressPR | null },
+>(
   repo: string,
-  features: FeatureVerdict[],
+  gaps: T[],
   githubToken: string | undefined,
   logger?: Logger
 ): Promise<void> {
-  const gaps = features.filter((f) => f.level2 !== 'supported')
   if (gaps.length === 0) return
   let prs
   try {

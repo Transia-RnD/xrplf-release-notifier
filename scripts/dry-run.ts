@@ -49,6 +49,7 @@ import { loadParityConfig } from '../src/parity/sdks'
 import { buildReference, deltaChecklist } from '../src/parity/reference'
 import { runSdkAgent } from '../src/parity/runSdkAgent'
 import { computeVerdicts, attachInProgressPRs } from '../src/parity/match'
+import { runDocsCheck } from '../src/parity/runDocsCheck'
 import { getFileAtRef } from '../src/github/client'
 import { formatParityReport } from '../src/parity/report'
 import type { SdkReport } from '../src/parity/report'
@@ -570,7 +571,12 @@ async function runParityDryRun(
           ? await getFileAtRef(sdk.repo, defPath, sdk.ref, githubToken)
           : null
         const features = computeVerdicts(checklist, inventory, defs)
-        await attachInProgressPRs(sdk.repo, features, githubToken, logger)
+        await attachInProgressPRs(
+          sdk.repo,
+          features.filter((f) => f.level2 !== 'supported'),
+          githubToken,
+          logger
+        )
         const result = {
           repo: sdk.repo,
           ref: sdk.ref,
@@ -603,6 +609,31 @@ async function runParityDryRun(
   if (att?.text) {
     console.log('  Body:')
     att.text.split('\n').forEach((l) => console.log(`    ${l}`))
+  }
+  console.log('═'.repeat(80) + '\n')
+
+  console.log(`Running docs parity against ${parityConfig.docs.repo}…`)
+  const docsPayload = await runDocsCheck({
+    reference,
+    versionType: version.type,
+    mode: 'delta',
+    docs: parityConfig.docs,
+    githubToken,
+    logger,
+  })
+  const docsAtt = docsPayload?.attachments?.[0]
+  console.log('\n' + '═'.repeat(80))
+  console.log('  MATTERMOST DOCS PARITY REPORT (not posted)')
+  console.log('═'.repeat(80))
+  if (!docsAtt) {
+    console.log('  (nothing to check or docs check failed — see logs)')
+  } else {
+    console.log(`  Color:   ${docsAtt.color}`)
+    console.log(`  Pretext: ${docsAtt.pretext}`)
+    if (docsAtt.text) {
+      console.log('  Body:')
+      docsAtt.text.split('\n').forEach((l) => console.log(`    ${l}`))
+    }
   }
   console.log('═'.repeat(80) + '\n')
 }

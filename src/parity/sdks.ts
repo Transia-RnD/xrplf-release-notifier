@@ -21,14 +21,23 @@ const SdkSchema = z.object({
   ref: z.string().min(1),
 })
 
+const DocsSchema = z.object({
+  /** GitHub `owner/repo` of the xrpl.org source, e.g. "XRPLF/xrpl-dev-portal". */
+  repo: z.string().regex(/^[^/]+\/[^/]+$/, 'repo must be "owner/name"'),
+  /** Branch the site is published from. */
+  ref: z.string().min(1),
+})
+
 const ConfigSchema = z.object({
   rippled: z.object({
     repo: z.string().regex(/^[^/]+\/[^/]+$/, 'repo must be "owner/name"'),
   }),
   sdks: z.array(SdkSchema).min(1),
+  docs: DocsSchema,
 })
 
 export type SdkTarget = z.infer<typeof SdkSchema>
+export type DocsTarget = z.infer<typeof DocsSchema>
 export type ParityConfig = z.infer<typeof ConfigSchema>
 
 /**

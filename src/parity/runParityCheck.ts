@@ -23,6 +23,7 @@ import {
 import type { LocationsCache } from './cache'
 import { formatParityReport } from './report'
 import type { SdkReport } from './report'
+import { runDocsCheck } from './runDocsCheck'
 
 export interface ParityDeps {
   config: AppConfig
@@ -60,13 +61,20 @@ export interface RunParityOptions {
   mode?: 'delta' | 'full'
   /** Build the report but skip the Mattermost post (verification). */
   dryRun?: boolean
+  /** Skip the per-SDK agent scans and run only the docs-parity check. */
+  docsOnly?: boolean
+}
+
+export interface ParityPayloads {
+  sdk?: MattermostPayload
+  docs?: MattermostPayload
 }
 
 export async function runParityCheck(
   version: VersionInfo,
   deps: ParityDeps,
   opts: RunParityOptions = {}
-): Promise<MattermostPayload | undefined> {
+): Promise<ParityPayloads | undefined> {
   const { config, storage, logger } = deps
   const tag = version.raw
 
@@ -103,52 +111,85 @@ export async function runParityCheck(
       addedAmendments: reference.addedAmendments,
     })
 
-    const sdks: SdkReport[] = []
-    const cache = await loadLocationsCache(storage)
+    const payloads: ParityPayloads = {}
 
-    if (checklist.length > 0) {
-      // Sequential, NOT parallel: each agent reads large definitions.json files,
-      // and running all SDKs at once bursts past the Anthropic per-minute
-      // input-token rate limit (5 concurrent Sonnet agents 429'd in practice).
-      for (const sdk of parityConfig.sdks) {
-        sdks.push(await auditSdk(sdk, reference, checklist, mode, cache, deps))
+    if (!opts.docsOnly) {
+      const sdks: SdkReport[] = []
+      const cache = await loadLocationsCache(storage)
+
+      if (checklist.length > 0) {
+        // Sequential, NOT parallel: each agent reads large definitions.json files,
+        // and running all SDKs at once bursts past the Anthropic per-minute
+        // input-token rate limit (5 concurrent Sonnet agents 429'd in practice).
+        for (const sdk of parityConfig.sdks) {
+          sdks.push(
+            await auditSdk(sdk, reference, checklist, mode, cache, deps)
+          )
+        }
+
+        // Persist whatever locations the agents resolved this run (best-effort).
+        try {
+          await saveLocationsCache(storage, cache)
+        } catch (err: unknown) {
+          logger.warn('Failed to persist parity locations cache', {
+            error: getErrorMessage(err),
+          })
+        }
       }
 
-      // Persist whatever locations the agents resolved this run (best-effort).
-      try {
-        await saveLocationsCache(storage, cache)
-      } catch (err: unknown) {
-        logger.warn('Failed to persist parity locations cache', {
-          error: getErrorMessage(err),
-        })
-      }
-    }
-
-    const payload = formatParityReport({
-      versionType: version.type,
-      reference,
-      sdks,
-      mode,
-    })
-
-    const behind = sdks.filter(
-      (s) =>
-        s.error !== undefined ||
-        (s.result?.features.some((f) => f.level2 !== 'supported') ?? false)
-    ).length
-
-    if (opts.dryRun) {
-      logger.info('DRY RUN — report built, not posted', {
-        tag,
+      payloads.sdk = formatParityReport({
+        versionType: version.type,
+        reference,
+        sdks,
         mode,
-        sdks: sdks.length,
-        behind,
       })
-    } else {
-      await postToMattermost(config.mattermostWebhookUrl, payload)
-      logger.info('Parity report posted', { tag, sdks: sdks.length, behind })
+
+      const behind = sdks.filter(
+        (s) =>
+          s.error !== undefined ||
+          (s.result?.features.some((f) => f.level2 !== 'supported') ?? false)
+      ).length
+
+      if (opts.dryRun) {
+        logger.info('DRY RUN — report built, not posted', {
+          tag,
+          mode,
+          sdks: sdks.length,
+          behind,
+        })
+      } else {
+        await postToMattermost(config.mattermostWebhookUrl, payloads.sdk)
+        logger.info('Parity report posted', { tag, sdks: sdks.length, behind })
+      }
     }
-    return payload
+
+    // Docs parity runs even when the SDK checklist is empty: its delta also
+    // covers ledger entries and amendments, which the SDK check excludes.
+    // Isolated so a docs failure (or a failed post) can't sink the SDK report.
+    try {
+      const docsPayload = await runDocsCheck({
+        reference,
+        versionType: version.type,
+        mode,
+        docs: parityConfig.docs,
+        githubToken: config.githubToken,
+        logger,
+      })
+      if (docsPayload) {
+        payloads.docs = docsPayload
+        if (!opts.dryRun) {
+          await postToMattermost(config.mattermostWebhookUrl, docsPayload)
+          logger.info('Docs parity report posted', { tag, mode })
+        }
+      }
+    } catch (err: unknown) {
+      logger.error('Docs parity step failed', {
+        tag,
+        error: getErrorMessage(err),
+      })
+    }
+
+    return payloads
   } catch (err: unknown) {
     logger.error('Parity check failed', {
       tag,
@@ -203,7 +244,12 @@ async function auditSdk(
 
     // 3. Deterministic verdicts + in-progress-PR annotation.
     const features = computeVerdicts(checklist, inventory, definitionsContent)
-    await attachInProgressPRs(sdk.repo, features, config.githubToken, logger)
+    await attachInProgressPRs(
+      sdk.repo,
+      features.filter((f) => f.level2 !== 'supported'),
+      config.githubToken,
+      logger
+    )
 
     const result: SdkParityResult = {
       repo: sdk.repo,
