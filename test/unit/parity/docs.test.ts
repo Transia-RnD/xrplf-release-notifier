@@ -8,6 +8,8 @@ import {
   checkLedgerEntryPage,
   checkAmendment,
   checkField,
+  checkFieldTable,
+  extractDocFieldNames,
 } from '../../../src/parity/docs'
 import type { Reference } from '../../../src/parity/reference'
 
@@ -190,6 +192,65 @@ describe('checkTxPage', () => {
     const v = checkTxPage('Batch', page, null, SIDEBARS, COMMON_LINKS)
     expect(v.level).toBe('documented')
     expect(v.evidence).toContain('H1 does not match `Batch`')
+  })
+
+  it('documented only when the field table carries every spec field', () => {
+    const spec = [
+      { name: 'RawTransactions', required: true },
+      { name: 'BatchSigners', required: false },
+    ]
+    const v = checkTxPage('Batch', TX_PAGE, null, SIDEBARS, COMMON_LINKS, spec)
+    expect(v.level).toBe('partial')
+    expect(v.checks.missingFields).toEqual(['BatchSigners'])
+    expect(v.evidence).toContain('field table missing: `BatchSigners`')
+
+    const aligned = checkTxPage(
+      'Batch',
+      TX_PAGE,
+      null,
+      SIDEBARS,
+      COMMON_LINKS,
+      [{ name: 'RawTransactions', required: true }]
+    )
+    expect(aligned.level).toBe('documented')
+  })
+
+  it('drifted doc fields are evidence only, never a downgrade', () => {
+    const page = TX_PAGE + '| `GhostField` | String | Blob | No | gone |\n'
+    const v = checkTxPage('Batch', page, null, SIDEBARS, COMMON_LINKS, [
+      { name: 'RawTransactions', required: true },
+    ])
+    expect(v.level).toBe('documented')
+    expect(v.checks.extraFields).toEqual(['GhostField'])
+    expect(v.evidence.join(' ')).toContain("format doesn't define")
+  })
+})
+
+describe('extractDocFieldNames / checkFieldTable', () => {
+  it('collects backticked first-cell names from table rows only', () => {
+    const page =
+      '# X\n' +
+      '| `Alpha` | String | Blob | Yes | a |\n' +
+      '| `Beta`  | Number | UInt32 | No | b |\n' +
+      'Prose with `Gamma` outside a table.\n'
+    expect(extractDocFieldNames(page)).toEqual(['Alpha', 'Beta'])
+  })
+
+  it('diffs spec vs page, excluding common tx fields from drift', () => {
+    const page =
+      '| `Account` | String | AccountID | Yes | common |\n' +
+      '| `Alpha` | String | Blob | Yes | a |\n' +
+      '| `Rogue` | String | Blob | No | drift |\n'
+    const { missing, extra } = checkFieldTable(
+      [
+        { name: 'Alpha', required: true },
+        { name: 'Beta', required: false },
+      ],
+      page
+    )
+    expect(missing).toEqual(['Beta'])
+    // Account is a common field (documented centrally) — not drift.
+    expect(extra).toEqual(['Rogue'])
   })
 })
 

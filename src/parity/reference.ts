@@ -20,10 +20,24 @@ export interface Feature {
   kind: FeatureKind
 }
 
+/** One field of a transaction/ledger-entry format, from the macro's spec block. */
+export interface FieldSpec {
+  name: string
+  required: boolean
+}
+
 export interface FeatureSets {
   transactionTypes: string[]
   ledgerEntryTypes: string[]
   fields: string[]
+  /**
+   * Per-type field specs parsed from the macro blocks
+   * (`TRANSACTION(..., ({ {sfX, SoeRequired}, ... }))`). Absent when the ref
+   * predates the field-spec macro layout — consumers must treat missing as
+   * "spec unknown", not "no fields".
+   */
+  txFields?: Record<string, FieldSpec[]>
+  ledgerEntryFields?: Record<string, FieldSpec[]>
   /** Votable amendment names (Supported::Yes) — context only; also seeds PR stems. */
   amendments: string[]
   /**
@@ -59,6 +73,12 @@ export interface Reference {
    * which would flag the entire protocol as "new" and explode the scan.
    */
   baselineMissing: boolean
+  /**
+   * For each ADDED field, the transaction/ledger-entry types whose format
+   * includes it at `tag` — i.e. the pages that should document it. Empty array
+   * = the field belongs to no type format (ledger header, metadata, etc.).
+   */
+  fieldOwners?: Record<string, Feature[]>
 }
 
 // XRPL_FEATURE(Name, Supported::Yes, ...) -> "Name"
@@ -118,6 +138,41 @@ export function parseFields(macro: string): string[] {
   return matchAll(macro, SFIELD_RE)
 }
 
+// Field-spec blocks: the macro entry's trailing `({ {sfX, SoeRequired}, ... })`
+// list. Case-insensitive on the Soe flag (SoeRequired vs older soeREQUIRED).
+const TX_BLOCK_RE =
+  /^TRANSACTION\(\s*[A-Za-z0-9_]+\s*,\s*[^,]+,\s*([A-Za-z0-9_]+)([\s\S]*?)\)\)/gm
+const LE_BLOCK_RE =
+  /^LEDGER_ENTRY(?:_DUPLICATE)?\(\s*[A-Za-z0-9_]+\s*,\s*[^,]+,\s*([A-Za-z0-9_]+)([\s\S]*?)\)\)/gm
+const SPEC_FIELD_RE = /\{\s*sf([A-Za-z0-9_]+)\s*,\s*[Ss]oe([A-Za-z]+)/g
+
+function parseFieldSpecBlocks(
+  macro: string,
+  blockRe: RegExp
+): Record<string, FieldSpec[]> {
+  const out: Record<string, FieldSpec[]> = {}
+  for (const block of macro.matchAll(blockRe)) {
+    const fields: FieldSpec[] = []
+    for (const f of block[2].matchAll(SPEC_FIELD_RE)) {
+      fields.push({ name: f[1], required: f[2].toLowerCase() === 'required' })
+    }
+    out[block[1]] = fields
+  }
+  return out
+}
+
+/** Per-transaction field specs, keyed by wire name (e.g. "Payment"). */
+export function parseTxFieldSpecs(macro: string): Record<string, FieldSpec[]> {
+  return parseFieldSpecBlocks(macro, TX_BLOCK_RE)
+}
+
+/** Per-ledger-entry field specs, keyed by entry name (e.g. "Check"). */
+export function parseLedgerEntryFieldSpecs(
+  macro: string
+): Record<string, FieldSpec[]> {
+  return parseFieldSpecBlocks(macro, LE_BLOCK_RE)
+}
+
 function matchAll(macro: string, re: RegExp): string[] {
   const out: string[] = []
   for (const line of macro.split('\n')) {
@@ -147,6 +202,8 @@ async function fetchSets(
     fields: parseFields(sfields),
     amendments: features ? parseAmendments(features) : [],
     unsupportedAmendments: features ? parseUnsupportedAmendments(features) : [],
+    txFields: parseTxFieldSpecs(transactions),
+    ledgerEntryFields: parseLedgerEntryFieldSpecs(ledgerEntries),
   }
 }
 
@@ -216,6 +273,20 @@ export async function buildReference(
     ? [...prev.amendments, ...prev.unsupportedAmendments]
     : []
 
+  // Owner types per added field — every format at `tag` that includes it.
+  const fieldOwners: Record<string, Feature[]> = {}
+  for (const f of added) {
+    if (f.kind !== 'field') continue
+    fieldOwners[f.name] = [
+      ...Object.entries(full.txFields ?? {})
+        .filter(([, fs]) => fs.some((s) => s.name === f.name))
+        .map(([n]): Feature => ({ name: n, kind: 'transactionType' })),
+      ...Object.entries(full.ledgerEntryFields ?? {})
+        .filter(([, fs]) => fs.some((s) => s.name === f.name))
+        .map(([n]): Feature => ({ name: n, kind: 'ledgerEntryType' })),
+    ]
+  }
+
   return {
     repo,
     tag,
@@ -229,6 +300,7 @@ export async function buildReference(
       ? []
       : diff(full.unsupportedAmendments, prevAllAmendments),
     baselineMissing,
+    fieldOwners,
   }
 }
 

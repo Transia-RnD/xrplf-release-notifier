@@ -1,4 +1,4 @@
-import type { Reference, FeatureKind } from './reference'
+import type { Reference, FeatureKind, FieldSpec } from './reference'
 import type { InProgressPR } from './runSdkAgent'
 
 /**
@@ -55,6 +55,10 @@ export interface DocChecks {
   inDevelopmentTable?: boolean
   /** Fields: pages where a `<name>` table row matched. */
   foundIn?: string[]
+  /** Format fields (from the macro spec) with no table row on the page. */
+  missingFields?: string[]
+  /** Table-row fields on the page that the format doesn't define (drift). */
+  extraFields?: string[]
 }
 
 export interface DocVerdict {
@@ -132,6 +136,102 @@ export function fullDocsChecklist(reference: Reference): DocFeature[] {
   ]
 }
 
+/**
+ * Common fields every transaction carries — documented centrally on
+ * transactions/common-fields.md (included via a snippet), so their presence on
+ * an individual page is neither required nor drift.
+ */
+const COMMON_TX_DOC_FIELDS = new Set([
+  'Account',
+  'AccountTxnID',
+  'Delegate',
+  'Fee',
+  'Flags',
+  'LastLedgerSequence',
+  'Memos',
+  'NetworkID',
+  'SigningPubKey',
+  'Signers',
+  'Sequence',
+  'SourceTag',
+  'TicketSequence',
+  'TransactionType',
+  'TxnSignature',
+])
+
+/** Ledger-entry commons — the whole of ledger-data/common-fields.md. */
+const COMMON_LE_DOC_FIELDS = new Set([
+  'LedgerEntryType',
+  'Flags',
+  'index',
+  'LedgerIndex',
+])
+
+export function commonDocFields(kind: DocFeatureKind): Set<string> {
+  return kind === 'ledgerEntryType'
+    ? COMMON_LE_DOC_FIELDS
+    : COMMON_TX_DOC_FIELDS
+}
+
+/**
+ * Field names documented as Markdown table rows. Matches both the plain and
+ * the linked first-cell forms:  `| \`Name\` |`  and  `| [\`Name\`](...) |`.
+ */
+export function extractDocFieldNames(page: string): string[] {
+  const out: string[] = []
+  for (const m of page.matchAll(/^\|\s*\[?`([A-Za-z0-9_]+)`/gm)) {
+    out.push(m[1])
+  }
+  return [...new Set(out)]
+}
+
+export interface FieldAlignment {
+  /** Spec fields with no table row on the page. */
+  missing: string[]
+  /** Page table rows naming fields the spec doesn't define (excl. commons). */
+  extra: string[]
+}
+
+export interface FieldTableOptions {
+  /** Fields documented centrally (common-fields pages) — never missing/drift. */
+  common?: Set<string>
+  /**
+   * Every sfield the protocol currently defines. A documented name that IS a
+   * real sfield but not in this type's spec is a nested-object member (e.g.
+   * SignerEntry rows), not drift — only unknown names get flagged as drift.
+   */
+  knownFields?: Set<string>
+}
+
+/**
+ * Diff a page's field table against the type's macro field spec. This is the
+ * "do the docs align" check: every field the protocol format defines must
+ * appear as a table row on the page that documents the type. Drift (`extra`)
+ * is deliberately conservative: uppercase field-shaped names only — flag and
+ * result-code tables (tfXxx/asfXxx/lsfXxx/tecXXX rows) never count.
+ */
+export function checkFieldTable(
+  spec: FieldSpec[],
+  page: string,
+  opts: FieldTableOptions = {}
+): FieldAlignment {
+  const common = opts.common ?? COMMON_TX_DOC_FIELDS
+  const documented = new Set(extractDocFieldNames(page))
+  const specNames = new Set(spec.map((f) => f.name))
+  return {
+    missing: spec
+      .map((f) => f.name)
+      .filter((n) => !documented.has(n) && !common.has(n)),
+    extra: [...documented].filter(
+      (n) =>
+        /^[A-Z]/.test(n) &&
+        !specNames.has(n) &&
+        !common.has(n) &&
+        !(opts.knownFields?.has(n) ?? false)
+    ),
+  }
+}
+
 function inNav(sidebars: string, pagePath: string): boolean {
   return sidebars.includes(`page: ${pagePath}`)
 }
@@ -151,9 +251,12 @@ function escapeRe(s: string): string {
 /**
  * Verdict for a page-backed feature (transaction or ledger entry):
  *   missing    = no page at the conventional path
- *   documented = page exists AND in sidebars nav AND in common-links
- *   partial    = page exists but nav or common-links registration is absent
- * H1/requiredAmendment mismatches are evidence only — never a downgrade.
+ *   documented = page exists AND in nav AND in common-links AND (when the
+ *                type's macro field spec is known) its field table carries a
+ *                row for every format field
+ *   partial    = page exists but a registration or a spec field is absent
+ * H1/requiredAmendment mismatches and extra (drifted) doc fields are evidence
+ * only — never a downgrade.
  */
 function pageVerdict(
   name: string,
@@ -162,7 +265,9 @@ function pageVerdict(
   pagePath: string,
   sidebars: string,
   commonLinks: string,
-  linkRefRes: RegExp[]
+  linkRefRes: RegExp[],
+  spec?: FieldSpec[],
+  knownFields?: Set<string>
 ): DocVerdict {
   const checks: DocChecks = { pageExists: page !== null }
   const evidence: string[] = []
@@ -182,9 +287,34 @@ function pageVerdict(
     evidence.push('no link-ref in _snippets/common-links.md')
   if (!checks.h1Matches) evidence.push(`H1 does not match \`${name}\``)
 
+  let aligned = true
+  if (spec && spec.length > 0) {
+    const { missing, extra } = checkFieldTable(spec, page, {
+      common: commonDocFields(kind),
+      knownFields,
+    })
+    checks.missingFields = missing
+    checks.extraFields = extra
+    if (missing.length > 0) {
+      aligned = false
+      evidence.push(`field table missing: ${listCapped(missing, 6)}`)
+    }
+    if (extra.length > 0) {
+      evidence.push(
+        `documents fields the format doesn't define: ${listCapped(extra, 4)}`
+      )
+    }
+  }
+
   const level: DocLevel =
-    checks.inNav && checks.inCommonLinks ? 'documented' : 'partial'
+    checks.inNav && checks.inCommonLinks && aligned ? 'documented' : 'partial'
   return { name, kind, level, checks, evidence }
+}
+
+function listCapped(names: string[], cap: number): string {
+  const shown = names.slice(0, cap).map((n) => `\`${n}\``)
+  const more = names.length - shown.length
+  return shown.join(', ') + (more > 0 ? ` (+${more} more)` : '')
 }
 
 /**
@@ -197,7 +327,9 @@ export function checkTxPage(
   page: string | null,
   pseudoPage: string | null,
   sidebars: string,
-  commonLinks: string
+  commonLinks: string,
+  spec?: FieldSpec[],
+  knownFields?: Set<string>
 ): DocVerdict {
   const isPseudo = page === null && pseudoPage !== null
   const verdict = pageVerdict(
@@ -210,7 +342,9 @@ export function checkTxPage(
     [
       new RegExp(`^\\[${escapeRe(name)} transaction\\]:`, 'm'),
       new RegExp(`^\\[${escapeRe(name)} pseudo-transaction\\]:`, 'm'),
-    ]
+    ],
+    spec,
+    knownFields
   )
   if (isPseudo) verdict.checks.isPseudo = true
   return verdict
@@ -221,7 +355,9 @@ export function checkLedgerEntryPage(
   name: string,
   page: string | null,
   sidebars: string,
-  commonLinks: string
+  commonLinks: string,
+  spec?: FieldSpec[],
+  knownFields?: Set<string>
 ): DocVerdict {
   return pageVerdict(
     name,
@@ -233,7 +369,9 @@ export function checkLedgerEntryPage(
     [
       new RegExp(`^\\[${escapeRe(name)} entry\\]:`, 'm'),
       new RegExp(`^\\[${escapeRe(name)} object\\]:`, 'm'),
-    ]
+    ],
+    spec,
+    knownFields
   )
 }
 

@@ -4,6 +4,8 @@ import {
   parseTransactionTypes,
   parseLedgerEntryTypes,
   parseFields,
+  parseTxFieldSpecs,
+  parseLedgerEntryFieldSpecs,
   buildReference,
   fullTypeChecklist,
   deltaChecklist,
@@ -23,7 +25,9 @@ const TRANSACTIONS_MACRO = `
 TRANSACTION(ttPAYMENT, 0, Payment,
     Delegation::Delegable, uint256{}, CreateAcct, ({...}))
 TRANSACTION(ttMPTOKEN_ISSUANCE_CREATE, 54, MPTokenIssuanceCreate,
-    Delegation::Delegable, uint256{}, NoPriv, ({...}))
+    Delegation::Delegable, uint256{}, NoPriv, ({
+    {sfMPTokenMetadata, SoeOptional},
+}))
 `
 
 const LEDGER_ENTRIES_MACRO = `
@@ -89,6 +93,65 @@ XRPL_FEATURE(NotVotable, Supported::no,  VoteBehavior::DefaultNo)
       'LedgerEntryType',
       'MPTokenMetadata',
     ])
+  })
+})
+
+describe('field-spec block parsing', () => {
+  const TX_WITH_SPECS = `
+/** This transaction type executes a payment. */
+TRANSACTION(ttPAYMENT, 0, Payment,
+    Delegation::Delegable,
+    uint256{},
+    CreateAcct | MayCreateMpt,
+    ({
+    {sfDestination, SoeRequired},
+    {sfAmount, SoeRequired, SoeMptSupported},
+    {sfDomainID, SoeOptional},
+}))
+
+TRANSACTION(ttESCROW_CREATE, 1, EscrowCreate,
+    Delegation::Delegable, uint256{}, NoPriv, ({
+    {sfDestination, SoeRequired},
+}))
+`
+
+  const LE_WITH_SPECS = `
+#define LEDGER_ENTRY_DUPLICATE(...) EXPAND(LEDGER_ENTRY(__VA_ARGS__))
+LEDGER_ENTRY(ltCHECK, 0x0043, Check, check, ({
+    {sfAccount,              SoeRequired},
+    {sfExpiration,           SoeOptional},
+}))
+LEDGER_ENTRY_DUPLICATE(ltDEPOSIT_PREAUTH, 0x0070, DepositPreauth, deposit_preauth, ({
+    {sfAccount,              SoeRequired},
+}))
+`
+
+  it('extracts per-transaction field specs with required flags', () => {
+    const specs = parseTxFieldSpecs(TX_WITH_SPECS)
+    expect(specs.Payment).toEqual([
+      { name: 'Destination', required: true },
+      { name: 'Amount', required: true },
+      { name: 'DomainID', required: false },
+    ])
+    expect(specs.EscrowCreate).toEqual([
+      { name: 'Destination', required: true },
+    ])
+  })
+
+  it('extracts ledger-entry specs including the DUPLICATE form', () => {
+    const specs = parseLedgerEntryFieldSpecs(LE_WITH_SPECS)
+    expect(specs.Check).toEqual([
+      { name: 'Account', required: true },
+      { name: 'Expiration', required: false },
+    ])
+    expect(specs.DepositPreauth).toEqual([{ name: 'Account', required: true }])
+  })
+
+  it('tolerates elided (...) bodies as empty specs', () => {
+    const specs = parseTxFieldSpecs(
+      'TRANSACTION(ttPAYMENT, 0, Payment,\n    Delegation::Delegable, uint256{}, CreateAcct, ({...}))\n'
+    )
+    expect(specs.Payment).toEqual([])
   })
 })
 
@@ -175,6 +238,10 @@ describe('buildReference', () => {
     // DynamicMPT is new this release AND Supported::No — the gap signal.
     expect(ref.addedUnsupportedAmendments).toEqual(['DynamicMPT'])
     expect(ref.baselineMissing).toBe(false)
+    // The new field's owning type resolved from the tag's field specs.
+    expect(ref.fieldOwners?.MPTokenMetadata).toEqual([
+      { name: 'MPTokenIssuanceCreate', kind: 'transactionType' },
+    ])
   })
 
   it('does NOT re-flag an amendment that was already Supported::No in the predecessor', async () => {

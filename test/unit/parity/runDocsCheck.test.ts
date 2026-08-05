@@ -25,6 +25,11 @@ function ref(overrides: Partial<Reference> = {}): Reference {
       fields: ['DomainID'],
       amendments: ['Batch'],
       unsupportedAmendments: [],
+      txFields: {
+        Payment: [],
+        Batch: [{ name: 'DomainID', required: false }],
+      },
+      ledgerEntryFields: { Credential: [] },
     },
     added: [
       { name: 'Batch', kind: 'transactionType' },
@@ -34,6 +39,9 @@ function ref(overrides: Partial<Reference> = {}): Reference {
     addedAmendments: ['Batch'],
     addedUnsupportedAmendments: [],
     baselineMissing: false,
+    fieldOwners: {
+      DomainID: [{ name: 'Batch', kind: 'transactionType' }],
+    },
     ...overrides,
   }
 }
@@ -141,16 +149,44 @@ describe('runDocsCheck (delta)', () => {
     )
   })
 
-  it('uses code search only for fields not found in candidates, and annotates PRs for gaps', async () => {
+  it('flags an owned field with no row on its owner page as a real gap (no code search)', async () => {
     mockFiles({
       ...HAPPY_FILES,
-      // Batch page gone -> tx gap; field no longer found in any candidate.
+      // Batch page exists but its field table lacks the new DomainID row.
+      'docs/references/protocol/transactions/types/batch.md':
+        '# Batch\n| `RawTransactions` | Array | STArray | Yes | x |\n',
+    })
+    const search = jest.spyOn(client, 'searchCode').mockResolvedValue([])
+    jest.spyOn(client, 'listPullRequests').mockResolvedValue([])
+
+    const payload = await runDocsCheck({
+      reference: ref(),
+      versionType: VersionType.FINAL,
+      mode: 'delta',
+      docs: DOCS,
+      logger: logger(),
+    })
+
+    const text = payload?.attachments?.[0].text ?? ''
+    // The page itself is out of alignment (spec field missing from the table)…
+    expect(text).toContain('🟠 `Batch` (tx): partial')
+    expect(text).toContain('field table missing: `DomainID`')
+    // …and the field is decisively missing, pinned to its owning page.
+    expect(text).toContain('🔴 `DomainID` (field): missing')
+    expect(text).toContain('no `DomainID` row on')
+    // Owned fields never fall back to fuzzy code search.
+    expect(search).not.toHaveBeenCalled()
+    // A FINAL release with alignment gaps is red.
+    expect(payload?.attachments?.[0].color).toBe('#F44336')
+  })
+
+  it('missing owner page: field folds into the page gap, PR annotation still fires', async () => {
+    mockFiles({
+      ...HAPPY_FILES,
       'docs/references/protocol/transactions/types/batch.md':
         undefined as unknown as string,
     })
-    const search = jest
-      .spyOn(client, 'searchCode')
-      .mockResolvedValue([{ path: 'docs/somewhere.md' }])
+    const search = jest.spyOn(client, 'searchCode').mockResolvedValue([])
     jest.spyOn(client, 'listPullRequests').mockResolvedValue([
       {
         number: 42,
@@ -169,15 +205,35 @@ describe('runDocsCheck (delta)', () => {
       logger: logger(),
     })
 
+    const text = payload?.attachments?.[0].text ?? ''
+    expect(text).toContain('🔴 `Batch` (tx)')
+    expect(text).toContain('PR #42 in progress')
+    expect(text).toContain('owning page(s) not written')
+    expect(search).not.toHaveBeenCalled()
+  })
+
+  it('falls back to code search only for fields no format owns', async () => {
+    mockFiles(HAPPY_FILES)
+    const search = jest
+      .spyOn(client, 'searchCode')
+      .mockResolvedValue([{ path: 'docs/somewhere.md' }])
+    jest.spyOn(client, 'listPullRequests').mockResolvedValue([])
+
+    const payload = await runDocsCheck({
+      // A ledger-header-style field: present in sfields, owned by no format.
+      reference: ref({ fieldOwners: { DomainID: [] } }),
+      versionType: VersionType.FINAL,
+      mode: 'delta',
+      docs: DOCS,
+      logger: logger(),
+    })
+
     expect(search).toHaveBeenCalledWith(
       DOCS.repo,
       '"DomainID" path:docs',
       undefined
     )
     const text = payload?.attachments?.[0].text ?? ''
-    expect(text).toContain('🔴 `Batch` (tx)')
-    expect(text).toContain('PR #42 in progress')
-    // Field upgraded to documented via the search hit.
     expect(text).toContain('✅ `DomainID` (field)')
   })
 
@@ -218,6 +274,11 @@ describe('runDocsCheck (full)', () => {
         SIDEBARS +
         '\npage: docs/references/protocol/transactions/types/payment.md',
       'resources/known-amendments.md': KNOWN_AMENDMENTS,
+      'docs/references/protocol/transactions/types/payment.md': '# Payment\n',
+      'docs/references/protocol/transactions/types/batch.md':
+        '# Batch\n| `DomainID` | String | Hash256 | No | x |\n',
+      'docs/references/protocol/ledger-data/ledger-entry-types/credential.md':
+        '# Credential\n',
     })
     jest.spyOn(client, 'listPullRequests').mockResolvedValue([])
 
@@ -230,15 +291,61 @@ describe('runDocsCheck (full)', () => {
     })
 
     expect(listDirSpy).toHaveBeenCalledTimes(3)
-    // Only sidebars + known-amendments fetched — never a page.
-    const fetched = fileSpy.mock.calls.map((c) => c[1])
-    expect(fetched.sort()).toEqual([
+    // Existence comes from the listings; every EXISTING page is then fetched
+    // once for the field-table alignment pass (never a 404 probe).
+    const fetched = fileSpy.mock.calls.map((c) => c[1]).sort()
+    expect(fetched).toEqual([
+      'docs/references/protocol/ledger-data/ledger-entry-types/credential.md',
+      'docs/references/protocol/transactions/types/batch.md',
+      'docs/references/protocol/transactions/types/payment.md',
       'resources/known-amendments.md',
       'sidebars.yaml',
     ])
-    expect(payload?.attachments?.[0].pretext).toContain('tx pages: 2/2')
-    expect(payload?.attachments?.[0].text).toContain(
-      'fields not audited in full mode'
-    )
+    const att = payload?.attachments?.[0]
+    expect(att?.pretext).toContain('tx pages: 2/2')
+    // Only Batch has a non-empty spec -> 1 page audited, and it aligns.
+    expect(att?.pretext).toContain('field tables aligned: 1/1')
+  })
+
+  it('full mode downgrades a page whose field table misses spec fields', async () => {
+    jest.spyOn(client, 'listDir').mockImplementation((_repo, path) => {
+      if (path.endsWith('/types'))
+        return Promise.resolve([{ name: 'batch.md', path: '', type: 'file' }])
+      return Promise.resolve([])
+    })
+    mockFiles({
+      'sidebars.yaml': SIDEBARS,
+      'resources/known-amendments.md': KNOWN_AMENDMENTS,
+      'docs/references/protocol/transactions/types/batch.md':
+        '# Batch\n| `SomethingElse` | String | Blob | No | x |\n',
+    })
+    jest.spyOn(client, 'listPullRequests').mockResolvedValue([])
+
+    const payload = await runDocsCheck({
+      reference: ref({
+        added: [],
+        addedAmendments: [],
+        addedUnsupportedAmendments: [],
+        full: {
+          transactionTypes: ['Batch'],
+          ledgerEntryTypes: [],
+          fields: [],
+          amendments: [],
+          unsupportedAmendments: [],
+          txFields: { Batch: [{ name: 'DomainID', required: false }] },
+          ledgerEntryFields: {},
+        },
+      }),
+      versionType: VersionType.FINAL,
+      mode: 'full',
+      docs: DOCS,
+      logger: logger(),
+    })
+
+    const att = payload?.attachments?.[0]
+    expect(att?.pretext).toContain('field tables aligned: 0/1')
+    expect(att?.text).toContain('🟠 `Batch` (tx): partial')
+    expect(att?.text).toContain('field table missing: `DomainID`')
+    expect(att?.text).toContain("documents fields the format doesn't define")
   })
 })

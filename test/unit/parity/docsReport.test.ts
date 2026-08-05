@@ -112,13 +112,19 @@ describe('formatDocsReport (delta)', () => {
 })
 
 describe('formatDocsReport (full)', () => {
-  it('summarizes per-kind coverage and lists gaps', () => {
+  it('summarizes per-kind coverage, field-table alignment, and lists gaps', () => {
     const payload = formatDocsReport(
       input(
         [
-          verdict({ name: 'Payment' }),
+          verdict({ name: 'Payment', checks: { missingFields: [] } }),
           verdict({ name: 'Batch', level: 'missing' }),
-          verdict({ name: 'Credential', kind: 'ledgerEntryType' }),
+          verdict({
+            name: 'Credential',
+            kind: 'ledgerEntryType',
+            level: 'partial',
+            checks: { missingFields: ['Subject'] },
+            evidence: ['field table missing: `Subject`'],
+          }),
           verdict({ name: 'Batch', kind: 'amendment' }),
         ],
         VersionType.FINAL,
@@ -127,17 +133,21 @@ describe('formatDocsReport (full)', () => {
     )
     const att = payload.attachments?.[0]
     expect(att?.pretext).toContain('tx pages: 1/2')
-    expect(att?.pretext).toContain('ledger entries: 1/1')
+    expect(att?.pretext).toContain('ledger entries: 0/1')
     expect(att?.pretext).toContain('amendments: 1/1')
+    // Two pages carried an auditable spec; only Payment's table aligns.
+    expect(att?.pretext).toContain('field tables aligned: 1/2')
     expect(att?.color).toBe('#FF9800')
     expect(att?.text).toContain('🔴 `Batch` (tx)')
-    expect(att?.text).toContain('fields not audited in full mode')
+    expect(att?.text).toContain('🟠 `Credential` (ledger)')
   })
 
   it('clean full sweep is green', () => {
     const payload = formatDocsReport(
       input([verdict({ name: 'Payment' })], VersionType.FINAL, 'full')
     )
-    expect(payload.attachments?.[0].color).toBe('#4CAF50')
+    const att = payload.attachments?.[0]
+    expect(att?.color).toBe('#4CAF50')
+    expect(att?.text).toContain('checks out')
   })
 })

@@ -86,10 +86,21 @@ function formatFullReport(input: FormatDocsReportInput): MattermostPayload {
   const am = byKind('amendment')
   const gaps = hardGaps(verdicts)
 
-  const summary = `tx pages: ${tx.ok}/${tx.total} · ledger entries: ${le.ok}/${le.total} · amendments: ${am.ok}/${am.total}`
+  // Field-table alignment across every page that has both a page and a spec.
+  const audited = verdicts.filter((v) => v.checks.missingFields !== undefined)
+  const aligned = audited.filter(
+    (v) => (v.checks.missingFields ?? []).length === 0
+  )
+  const fieldSummary =
+    audited.length > 0
+      ? ` · field tables aligned: ${aligned.length}/${audited.length}`
+      : ''
+
+  const summary = `tx pages: ${tx.ok}/${tx.total} · ledger entries: ${le.ok}/${le.total} · amendments: ${am.ok}/${am.total}${fieldSummary}`
   const body =
-    (gaps.length > 0 ? `${formatLines(gaps)}\n\n` : '') +
-    `_fields not audited in full mode_`
+    gaps.length > 0
+      ? formatLines(gaps)
+      : '_every page, nav entry, amendment entry, and field table checks out_'
 
   return envelope(
     {
