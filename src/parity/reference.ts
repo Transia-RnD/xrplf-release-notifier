@@ -1,6 +1,6 @@
 import type { Logger } from 'winston'
 import { getFileAtRef } from '../github/client'
-import { findPredecessorTag } from '../version/predecessor'
+import { findLastFinalTag, findPredecessorTag } from '../version/predecessor'
 import { splitRepo } from './sdks'
 
 /**
@@ -231,10 +231,18 @@ export async function buildReference(
     )
   }
 
+  // Prereleases diff against the LAST FINAL, not the closest tag: rc2 vs rc1
+  // is a near-empty delta that hides the cumulative "what does X.Y.Z need"
+  // picture — especially under the private-build flow where the whole RC train
+  // syncs to the public repo at once. Finals already skip prereleases inside
+  // findPredecessorTag.
+  const isPrerelease = tag.replace(/^v/, '').includes('-')
   const predecessorTag =
     opts.predecessorTag !== undefined
       ? opts.predecessorTag
-      : await findPredecessorTag(owner, name, tag, githubToken)
+      : isPrerelease
+        ? await findLastFinalTag(owner, name, tag, githubToken)
+        : await findPredecessorTag(owner, name, tag, githubToken)
 
   const prev = predecessorTag
     ? await fetchSets(repo, predecessorTag, githubToken)

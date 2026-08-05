@@ -267,6 +267,28 @@ describe('buildReference', () => {
     expect(ref.addedUnsupportedAmendments).toEqual([])
   })
 
+  it('auto-resolves a prerelease baseline to the LAST FINAL, not the closest tag', async () => {
+    jest
+      .spyOn(githubApi, 'getFileAtRef')
+      .mockImplementation((_repo, file, ref) =>
+        Promise.resolve(mockMacros(ref, file))
+      )
+    // Closest tag before 2.2.0-rc2 is 2.2.0-rc1 — the cumulative baseline
+    // must still be the last final (2.1.0).
+    const tagsSpy = jest
+      .spyOn(githubApi, 'listVersionTags')
+      .mockResolvedValue(['2.1.0', '2.2.0-b1', '2.2.0-rc1', '2.2.0-rc2'])
+
+    const ref = await buildReference({
+      repo: 'XRPLF/rippled',
+      tag: '2.2.0-rc2',
+    })
+
+    expect(tagsSpy).toHaveBeenCalled()
+    expect(ref.predecessorTag).toBe('2.1.0')
+    expect(ref.added.length).toBeGreaterThan(0)
+  })
+
   it('flags baselineMissing and empties the delta when the predecessor cannot be parsed', async () => {
     jest
       .spyOn(githubApi, 'getFileAtRef')
