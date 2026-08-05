@@ -176,6 +176,50 @@ describe('runParityCheck (orchestrator, dry run)', () => {
   })
 })
 
+describe('runParityCheck (prerelease tag-burst debounce)', () => {
+  const rcVersion: VersionInfo = {
+    ...version,
+    raw: '3.3.0-rc1',
+    minor: 3,
+    type: VersionType.RC,
+    branch: 'parity:3.3.0-rc1',
+  }
+
+  it('skips a prerelease entirely once the line final is tagged', async () => {
+    mockHappyPath()
+    jest
+      .spyOn(client, 'listVersionTags')
+      .mockResolvedValue(['3.2.1', '3.3.0-rc1', '3.3.0'])
+    const post = jest.spyOn(mm, 'postToMattermost').mockResolvedValue()
+
+    const payload = await runParityCheck(rcVersion, deps, {
+      mode: 'delta',
+      dryRun: true,
+    })
+
+    expect(payload).toBeUndefined()
+    expect(reference.buildReference).not.toHaveBeenCalled()
+    expect(agent.runSdkAgent).not.toHaveBeenCalled()
+    expect(post).not.toHaveBeenCalled()
+  })
+
+  it('runs a prerelease normally while its final does not exist yet', async () => {
+    mockHappyPath()
+    jest
+      .spyOn(client, 'listVersionTags')
+      .mockResolvedValue(['3.2.1', '3.3.0-rc1'])
+
+    const payload = await runParityCheck(rcVersion, deps, {
+      mode: 'delta',
+      predecessorTag: '3.2.1',
+      dryRun: true,
+    })
+
+    expect(payload?.sdk?.attachments?.[0]).toBeDefined()
+    expect(agent.runSdkAgent).toHaveBeenCalled()
+  })
+})
+
 describe('runParityCheck (docs parity integration)', () => {
   const DOCS_PAYLOAD = {
     username: 'docs parity',

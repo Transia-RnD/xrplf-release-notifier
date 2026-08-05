@@ -59,6 +59,23 @@ export async function findPreviousTag(
 }
 
 /**
+ * Whether the FINAL release of `tag`'s line (X.Y.Z for X.Y.Z-bN/-rcN) already
+ * exists in the repo. Used to debounce prerelease work when a whole privately
+ * built tag train (rc1..rcN + final) syncs to the public repo at once — the
+ * final's report supersedes every RC's.
+ */
+export async function finalTagExists(
+  owner: string,
+  repo: string,
+  tag: string,
+  token?: string
+): Promise<boolean> {
+  const releaseLine = tag.replace(/^v/, '').replace(/-.*$/, '')
+  const tags = await listVersionTags(owner, repo, token)
+  return tags.some((t) => t.replace(/^v/, '') === releaseLine)
+}
+
+/**
  * Find the last FINAL (stable) release strictly before `tag`'s release line —
  * the right baseline for "what's new for SDKs in this release". For a beta like
  * 3.2.0-b7 (or the 3.2.0 final, or an RC) this returns 3.1.3, so the surface

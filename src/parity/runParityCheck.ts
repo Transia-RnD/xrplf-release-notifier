@@ -2,6 +2,8 @@ import type { Logger } from 'winston'
 import type { Storage } from '@google-cloud/storage'
 import type { AppConfig } from '../config'
 import type { VersionInfo } from '../version/types'
+import { VersionType } from '../version/types'
+import { finalTagExists } from '../version/predecessor'
 import { postToMattermost } from '../notifications/mattermost'
 import type { MattermostPayload } from '../notifications/mattermost'
 import { loadParityConfig } from './sdks'
@@ -90,6 +92,23 @@ export async function runParityCheck(
 
   try {
     const parityConfig = loadParityConfig()
+
+    // Tag-burst debounce: the team builds RCs privately and syncs the whole
+    // train (rc1..rcN + final) to the public repo at cycle end. Each tag fires
+    // this check, and every prerelease would post the same cumulative report —
+    // once the line's FINAL exists, its report supersedes them all, so skip.
+    const isPrerelease =
+      version.type === VersionType.BETA || version.type === VersionType.RC
+    if (isPrerelease && mode === 'delta') {
+      const [owner, name] = parityConfig.rippled.repo.split('/')
+      if (await finalTagExists(owner, name, tag, config.githubToken)) {
+        logger.info(
+          'Skipping prerelease parity — final for this line already tagged',
+          { tag }
+        )
+        return undefined
+      }
+    }
 
     const reference = await buildReference({
       repo: parityConfig.rippled.repo,
