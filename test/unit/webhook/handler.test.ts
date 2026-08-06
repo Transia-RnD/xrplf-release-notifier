@@ -65,6 +65,7 @@ const mockConfig: AppConfig = {
   twitterAccessTokenSecret: 'access-secret',
   anthropicApiKey: 'test-anthropic-key',
   gcpProjectId: 'test',
+  alphanetSyncDebounceMinutes: 30,
 }
 
 const mockStorage = {} as Storage
@@ -88,9 +89,8 @@ describe('handlePushEvent', () => {
 
   afterEach(() => jest.resetAllMocks())
 
-  it('ignores all branch pushes (source bumps no longer notify)', async () => {
+  it('ignores non-develop branch pushes (source bumps no longer notify)', async () => {
     for (const ref of [
-      'refs/heads/develop',
       'refs/heads/release-3.1',
       'refs/heads/feature/my-feature',
     ]) {
@@ -102,6 +102,19 @@ describe('handlePushEvent', () => {
       expect(mattermost.postToMattermost).not.toHaveBeenCalled()
       expect(twitter.postToTwitter).not.toHaveBeenCalled()
     }
+  })
+
+  it('dispatches an alphanet sync on develop pushes, never a notification', async () => {
+    const result = await handlePushEvent(
+      withRepo({ ref: 'refs/heads/develop', after: 'abc123', commits: [] }),
+      deps
+    )
+    expect(result.action).toBe('alphanet-sync')
+    // No sync URL configured in the test config — dispatch reports disabled.
+    expect(result.reason).toBe('disabled')
+    expect(result.branch).toBe('develop')
+    expect(mattermost.postToMattermost).not.toHaveBeenCalled()
+    expect(twitter.postToTwitter).not.toHaveBeenCalled()
   })
 
   it('notifies on a BETA tag push', async () => {

@@ -18,6 +18,10 @@ export interface AppConfig {
   anthropicApiKey: string
   pollerToken?: string
   gcpProjectId: string
+  /** Sentinel endpoint for alphanet Stage-1 branch syncs; feature off when unset. */
+  alphanetSyncUrl?: string
+  alphanetSyncSecret?: string
+  alphanetSyncDebounceMinutes: number
 }
 
 interface AppSecrets {
@@ -30,6 +34,12 @@ interface AppSecrets {
   TWITTER_ACCESS_TOKEN_SECRET: string
   ANTHROPIC_API_KEY: string
   POLLER_TOKEN?: string
+  ALPHANET_SYNC_SECRET?: string
+}
+
+function alphanetSyncDebounceMinutes(): number {
+  const parsed = parseInt(process.env.ALPHANET_SYNC_DEBOUNCE_MINUTES ?? '30', 10)
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 30
 }
 
 export async function loadConfig(): Promise<AppConfig> {
@@ -52,6 +62,9 @@ export async function loadConfig(): Promise<AppConfig> {
     anthropicApiKey: requireEnv('ANTHROPIC_API_KEY'),
     pollerToken: process.env.POLLER_TOKEN,
     gcpProjectId,
+    alphanetSyncUrl: process.env.ALPHANET_SYNC_URL,
+    alphanetSyncSecret: process.env.ALPHANET_SYNC_SECRET,
+    alphanetSyncDebounceMinutes: alphanetSyncDebounceMinutes(),
   }
 }
 
@@ -85,5 +98,8 @@ async function loadFromSecretManager(
     anthropicApiKey: secrets.ANTHROPIC_API_KEY,
     pollerToken: secrets.POLLER_TOKEN,
     gcpProjectId,
+    alphanetSyncUrl: process.env.ALPHANET_SYNC_URL,
+    alphanetSyncSecret: secrets.ALPHANET_SYNC_SECRET,
+    alphanetSyncDebounceMinutes: alphanetSyncDebounceMinutes(),
   }
 }

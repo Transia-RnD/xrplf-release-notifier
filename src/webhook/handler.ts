@@ -21,6 +21,7 @@ import type { TagBreakingLevel } from '../notifications/mattermost'
 import type { AppConfig } from '../config'
 import type { RepoConfig } from '../github/repos'
 import { findRepoByFullName, repoFullName } from '../github/repos'
+import { maybeDispatchAlphanetSync } from '../alphanet/sync'
 import { tagFloodGuard, formatTagFloodNotice } from './floodGuard'
 import { getErrorMessage } from '../utils/error'
 import {
@@ -74,6 +75,17 @@ export async function handlePushEvent(
   const tagMatch = ref.match(TAG_REGEX)
   if (tagMatch) {
     return handleTagPush(tagMatch[1], payload, repo, deps)
+  }
+  if (ref === 'refs/heads/develop' && repo.visibility === 'public') {
+    // Upstream develop moved — kick sentinel's Stage-1 alphanet branch sync
+    // so proposal branches stay current instead of drifting until deploy day.
+    const outcome = await maybeDispatchAlphanetSync(deps.config, deps.logger)
+    return {
+      action: 'alphanet-sync',
+      reason: outcome,
+      branch: 'develop',
+      repo: repoFullName(repo),
+    }
   }
   return { action: 'ignored', reason: 'branch pushes do not notify' }
 }
