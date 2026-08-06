@@ -278,7 +278,10 @@ pub fn core_semver(version: &str) -> Option<(u8, u8, u8)> {
 /// incident-time attack-report.py. Always returns an alert (it's a status
 /// card, not a fault signal); the dedup key encodes the patched percent so a
 /// change posts immediately and steady state falls to the heartbeat window.
-pub fn evaluate_adoption(report: &Report, min: (u8, u8, u8)) -> RuleAlert {
+/// The bool is true when no vulnerable core nodes remain (and at least one
+/// core node reports) — the caller should then post once and stop the
+/// heartbeat.
+pub fn evaluate_adoption(report: &Report, min: (u8, u8, u8)) -> (RuleAlert, bool) {
     let (mut patched, mut vulnerable, mut other) = (0usize, 0usize, 0usize);
     let mut lagging: Vec<(&str, usize)> = Vec::new();
     for (ver, &count) in &report.versions {
@@ -317,7 +320,7 @@ pub fn evaluate_adoption(report: &Report, min: (u8, u8, u8)) -> RuleAlert {
     if !top.is_empty() {
         text.push_str(&format!("\n\n**Top vulnerable builds:**\n{top}"));
     }
-    RuleAlert {
+    let alert = RuleAlert {
         severity,
         category: "PATCH_ADOPTION",
         key: format!("{min_s}@{patched_pct}"),
@@ -330,7 +333,8 @@ pub fn evaluate_adoption(report: &Report, min: (u8, u8, u8)) -> RuleAlert {
             ("other/non-core".into(), other.to_string()),
             ("total crawled".into(), report.nodes.to_string()),
         ],
-    }
+    };
+    (alert, vulnerable == 0 && core > 0)
 }
 
 #[cfg(test)]
@@ -421,8 +425,9 @@ mod tests {
             ("rippled-3.1.3".into(), 200),
             ("xrpl-rust-validator/0.1.0".into(), 50),
         ]);
-        let a = evaluate_adoption(&r, (3, 2, 1));
+        let (a, fully_patched) = evaluate_adoption(&r, (3, 2, 1));
         // 200 patched / 1000 core → 20%, 80% vulnerable → CRITICAL
+        assert!(!fully_patched);
         assert_eq!(a.severity, Severity::Critical);
         assert_eq!(a.key, "3.2.1@20");
         assert!(a.title.contains("20%"));
@@ -433,22 +438,30 @@ mod tests {
 
         // mostly patched → WARNING band, then INFO when nearly complete
         r.versions = HashMap::from([("xrpld-3.2.1".into(), 850), ("xrpld-3.2.0".into(), 150)]);
-        assert_eq!(evaluate_adoption(&r, (3, 2, 1)).severity, Severity::Warning);
+        assert_eq!(evaluate_adoption(&r, (3, 2, 1)).0.severity, Severity::Warning);
         r.versions = HashMap::from([("xrpld-3.2.1".into(), 950), ("xrpld-3.2.0".into(), 50)]);
-        let done = evaluate_adoption(&r, (3, 2, 1));
+        let (done, fully_patched) = evaluate_adoption(&r, (3, 2, 1));
         assert_eq!(done.severity, Severity::Info);
+        assert!(!fully_patched); // 50 still vulnerable
         // movement changes the dedup key → posts immediately
         assert_ne!(done.key, "3.2.1@20");
         assert_eq!(done.key, "3.2.1@95");
+
+        // everyone patched → terminal card, heartbeat stops
+        r.versions = HashMap::from([("xrpld-3.2.1".into(), 1000)]);
+        let (all_clear, fully_patched) = evaluate_adoption(&r, (3, 2, 1));
+        assert_eq!(all_clear.key, "3.2.1@100");
+        assert!(fully_patched);
     }
 
     #[test]
     fn adoption_handles_no_core_nodes() {
         let mut r = rpt(10, 0, 0, 0);
         r.versions = HashMap::from([("Hubster/1.0.0".into(), 10)]);
-        let a = evaluate_adoption(&r, (3, 2, 1));
+        let (a, fully_patched) = evaluate_adoption(&r, (3, 2, 1));
         assert_eq!(a.severity, Severity::Info);
         assert_eq!(a.key, "3.2.1@0");
+        assert!(!fully_patched); // zero core nodes is no evidence of patching
     }
 
     #[test]

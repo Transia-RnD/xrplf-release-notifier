@@ -278,12 +278,18 @@ pub async fn run(
             }
             // Adoption status card: every crawl evaluates; the percent-encoding
             // dedup key posts movement immediately, steady state heartbeats.
+            // Fully patched → the key posts once and the heartbeat stops.
             if let Some(min_s) = min_safe_version {
                 match crate::version::parse_min(min_s) {
                     Some(min) => {
-                        let a = report::evaluate_adoption(&fresh, min);
+                        let (a, fully_patched) = report::evaluate_adoption(&fresh, min);
+                        let realert = if fully_patched {
+                            i64::MAX
+                        } else {
+                            report::ADOPTION_REALERT_SECS
+                        };
                         sink.send_every(
-                            report::ADOPTION_REALERT_SECS,
+                            realert,
                             a.severity,
                             a.category,
                             &a.key,

@@ -9,7 +9,9 @@
 //!
 //! Companion to the crawl's network-wide PATCH_ADOPTION; the same cadence
 //! (movement posts immediately, steady state heartbeats at 12h) via a dedup key
-//! that encodes the patched percent.
+//! that encodes the patched percent. Once no vulnerable validators remain the
+//! card is terminal: the all-clear posts once and the heartbeat stops — a later
+//! regression changes the percent, mints a new key, and posts immediately.
 
 use crate::version;
 use crate::webhook::AlertSink;
@@ -45,6 +47,8 @@ impl FeedValidator {
 
 struct AdoptionCard {
     severity: Severity,
+    /// No vulnerable validators among a non-empty reporting set — heartbeat stops.
+    fully_patched: bool,
     key: String,
     title: String,
     text: String,
@@ -116,6 +120,7 @@ fn evaluate(validators: &[FeedValidator], min: (u8, u8, u8)) -> AdoptionCard {
 
     AdoptionCard {
         severity,
+        fully_patched: vulnerable.is_empty() && reporting > 0,
         key: format!("{min_s}@{patched_pct}"),
         title: format!("UNL patch adoption: {patched_pct}% of reporting validators on >={min_s}"),
         text,
@@ -158,8 +163,14 @@ pub async fn run(
     let mut sink = AlertSink::new(webhook, dry_run, webhook_state, "xrpl-crawler/unl-adoption");
     if sink.enabled() {
         let now = chrono::Utc::now().timestamp();
+        // Fully patched → post this key once, no heartbeat.
+        let realert = if card.fully_patched {
+            i64::MAX
+        } else {
+            crate::report::ADOPTION_REALERT_SECS
+        };
         sink.send_every(
-            crate::report::ADOPTION_REALERT_SECS,
+            realert,
             card.severity,
             "UNL_PATCH_ADOPTION",
             &card.key,
@@ -214,6 +225,7 @@ mod tests {
         assert_eq!(c.fields[3].1, "3"); // UNL size (mainnet only)
         assert_eq!(c.key, "3.2.1@33");
         assert_eq!(c.severity, Severity::Critical); // 66% vulnerable
+        assert!(!c.fully_patched);
         assert!(c.text.contains("b.example"));
         assert!(c.text.contains("c.example")); // the RC is listed vulnerable
     }
@@ -229,7 +241,19 @@ mod tests {
         assert_eq!(c.fields[2].1, "1"); // no version
         assert_eq!(c.key, "3.2.1@100"); // 1/1 reporting patched
         assert_eq!(c.severity, Severity::Info);
+        assert!(c.fully_patched);
         assert!(c.text.contains("report no version"));
+    }
+
+    #[test]
+    fn no_reporting_members_is_not_fully_patched() {
+        let feed = vec![
+            v("nA", "main", true, None, None),
+            v("nB", "main", true, None, None),
+        ];
+        let c = evaluate(&feed, (3, 2, 1));
+        assert_eq!(c.key, "3.2.1@0");
+        assert!(!c.fully_patched); // no evidence of patching, keep heartbeating
     }
 
     #[test]

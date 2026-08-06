@@ -58,14 +58,17 @@ Suspicious-version detection is **off unless** `--suspicious-version` is set.
 | `ECLIPSE_RISK` | CRITICAL (any high) / WARNING (≥3 medium) | Legitimate nodes have a majority of suspicious inbound peers | 24h |
 | `TOPOLOGY_COLLAPSE` | WARNING | Reachable node count fell below 60% of the previous crawl (partition/crawl failure) | 24h |
 | `NEW_VERSION` | INFO | A version absent last crawl now runs on ≥10 nodes (a release rolling out) | per version, 24h |
-| `PATCH_ADOPTION` | INFO (<10% vulnerable) / WARNING / CRITICAL (≥50%) | `--min-safe-version X.Y.Z` set: share of core (rippled/xrpld) nodes at/above the hotfix version, with top vulnerable builds | on movement + 12h heartbeat |
+| `PATCH_ADOPTION` | INFO (<10% vulnerable) / WARNING / CRITICAL (≥50%) | `--min-safe-version X.Y.Z` set: share of core (rippled/xrpld) nodes at/above the hotfix version, with top vulnerable builds | on movement + 12h heartbeat while vulnerable nodes remain; at 0 vulnerable the all-clear posts once |
 
 `PATCH_ADOPTION` is the standing version of `scripts/attack-report.py` (the
 manifest-flood incident post) and keeps its classification: base semver of
 `rippled-`/`xrpld-` builds, pre-releases of the fix count as patched, non-core
 clients bucket as "other". Cadence: the hourly crawl always evaluates; the
 dedup key encodes the patched percent, so any percentage-point move posts
-immediately, while an unchanged percent re-posts only every 12h. The unit ships
+immediately, while an unchanged percent re-posts only every 12h. Once no
+vulnerable nodes remain the card is terminal: the all-clear posts once and the
+heartbeat stops (a regression changes the percent and posts immediately). The
+unit ships
 `--min-safe-version 3.2.1` (the manifest-flood hotfix); bump the flag when the
 next security release becomes the floor.
 
@@ -99,12 +102,13 @@ carries no version are reported but excluded from the percentage.
 
 | Alert | Severity | Fires when | Dedup |
 |-------|----------|-----------|-------|
-| `UNL_PATCH_ADOPTION` | INFO (<10% vulnerable) / WARNING / CRITICAL (≥50%) | Share of reporting UNL validators at/above the hotfix, naming the vulnerable ones by domain | on movement + 12h heartbeat |
+| `UNL_PATCH_ADOPTION` | INFO (<10% vulnerable) / WARNING / CRITICAL (≥50%) | Share of reporting UNL validators at/above the hotfix, naming the vulnerable ones by domain | on movement + 12h heartbeat while vulnerable validators remain; at 0 vulnerable the all-clear posts once |
 
 Same cadence as the network-wide `PATCH_ADOPTION`: the dedup key encodes the
 patched percent, so a change posts immediately and an unchanged percent
-re-posts every 12h. RCs of the fix count as vulnerable (the fix lands in the
-final). Unit ships `--min-safe-version 3.2.1`.
+re-posts every 12h — until no vulnerable validators remain, at which point the
+100% card posts once and the heartbeat stops. RCs of the fix count as
+vulnerable (the fix lands in the final). Unit ships `--min-safe-version 3.2.1`.
 
 **Why this and not the validations stream:** the overlay binds a build version
 only to a node key and validator identity only to a master key, and the two
