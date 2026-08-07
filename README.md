@@ -174,9 +174,9 @@ What fires Mattermost vs Twitter, per event × per repo. **`yes` = posts every t
 | `release.published` (draft) | any | — | — |
 | `release.published` RC | public | yes — orange `formatMattermost(RELEASE)` + AI body summary | — |
 | `release.published` RC | private | yes — grey `formatMattermostPrivateReleaseHeadsUp` + AI summary of payload body | — |
-| `release.published` FINAL | public | yes — green `formatMattermost(RELEASE)` + AI body summary | — |
+| `release.published` FINAL | public | — (suppressed: the binary-poll post gates on this release existing and repeats it with strictly more — install commands, breaking/surface report, tweet) | — |
 | `release.published` FINAL | private | yes — grey `formatMattermostPrivateReleaseHeadsUp` + AI summary of payload body | — |
-| Binary `.deb`/`.rpm` on `pool/stable/` for a FINAL | (treated as public) | yes — green `formatMattermost(BINARY_POLL)` + install commands | **yes** — release-card PNG + `Release notes: …` link |
+| Binary `.deb`/`.rpm` on `pool/stable/` for a FINAL | (treated as public) | yes — green `formatMattermost(BINARY_POLL)` + install commands + deterministic breaking/surface report; also fires the one SDK/docs parity scan | **yes** (when `TWITTER_POSTING_ENABLED=true`) — release-card PNG + `Release notes: …` link |
 | Binary on `pool/stable/` for non-FINAL | — | — | — |
 
 ### Lifecycle of one FINAL release
@@ -184,12 +184,13 @@ What fires Mattermost vs Twitter, per event × per repo. **`yes` = posts every t
 For a final like `3.2.0`, expect over hours-to-days:
 
 ```
-git tag 3.2.0 pushed              → 1 Mattermost post  (blue tag, commit-compare summary)
-GitHub Release 3.2.0 published    → 1 Mattermost post  (green release, body summary)
-.deb/.rpm on pool/stable/         → 1 Mattermost post  (green binary, install commands)
+git tag 3.2.0 pushed              → 1 Mattermost post  (blue tag, surface report + commit-compare summary)
+GitHub Release 3.2.0 published    → no post            (binary-poll announcement owns it)
+.deb/.rpm on pool/stable/         → 1 Mattermost post  (green binary, install commands + full report)
                                   + 1 tweet            (image + release-notes link, "install now")
+                                  + 1 parity report    (SDK + docs parity, fired once from this path)
                                    ─────────────────────────────
-                          Total:    3 Mattermost posts + 1 tweet
+                          Total:    2 Mattermost posts + 1 tweet + 1 parity report
 ```
 
 If the same release also hits xrpld-private with a tag push and release publish, add **2 more** grey Mattermost heads-ups (no tweets).

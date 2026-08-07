@@ -340,7 +340,26 @@ describe('handleReleaseEvent', () => {
 
   afterEach(() => jest.resetAllMocks())
 
-  it('notifies when a release is published', async () => {
+  it('notifies when an RC release is published', async () => {
+    const payload = withRepo({
+      action: 'published',
+      release: {
+        tag_name: '3.1.0-rc1',
+        html_url: 'https://github.com/XRPLF/rippled/releases/tag/3.1.0-rc1',
+        draft: false,
+        prerelease: true,
+      },
+    })
+    const result = await handleReleaseEvent(payload, deps)
+    expect(result.action).toBe('notified')
+    expect(result.version).toBe('3.1.0-rc1')
+    expect(result.source).toBe('release')
+    expect(result.repo).toBe(PUBLIC_REPO_FULL_NAME)
+    expect(mattermost.postToMattermost).toHaveBeenCalled()
+    expect(twitter.postToTwitter).not.toHaveBeenCalled()
+  })
+
+  it('suppresses the post for a public FINAL release (binary poll owns it)', async () => {
     const payload = withRepo({
       action: 'published',
       release: {
@@ -351,27 +370,24 @@ describe('handleReleaseEvent', () => {
       },
     })
     const result = await handleReleaseEvent(payload, deps)
-    expect(result.action).toBe('notified')
+    expect(result.action).toBe('ignored')
     expect(result.version).toBe('3.1.0')
-    expect(result.source).toBe('release')
-    expect(result.repo).toBe(PUBLIC_REPO_FULL_NAME)
-    expect(mattermost.postToMattermost).toHaveBeenCalled()
-    expect(twitter.postToTwitter).not.toHaveBeenCalled()
+    expect(mattermost.postToMattermost).not.toHaveBeenCalled()
   })
 
   it('strips a v prefix on release tag_name', async () => {
     const payload = withRepo({
       action: 'published',
       release: {
-        tag_name: 'v3.1.0',
-        html_url: 'https://github.com/XRPLF/rippled/releases/tag/v3.1.0',
+        tag_name: 'v3.1.0-rc1',
+        html_url: 'https://github.com/XRPLF/rippled/releases/tag/v3.1.0-rc1',
         draft: false,
-        prerelease: false,
+        prerelease: true,
       },
     })
     const result = await handleReleaseEvent(payload, deps)
     expect(result.action).toBe('notified')
-    expect(result.version).toBe('3.1.0')
+    expect(result.version).toBe('3.1.0-rc1')
   })
 
   it('ignores draft releases', async () => {

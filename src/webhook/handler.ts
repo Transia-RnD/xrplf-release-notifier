@@ -2,7 +2,7 @@ import type { Logger } from 'winston'
 import type { Storage } from '@google-cloud/storage'
 import { classifyVersion } from '../version/parser'
 import type { VersionInfo } from '../version/types'
-import { NotificationSource } from '../version/types'
+import { NotificationSource, VersionType } from '../version/types'
 import type { MattermostPayload } from '../notifications/mattermost'
 import {
   formatMattermost,
@@ -298,6 +298,26 @@ export async function handleReleaseEvent(
       version: classified.raw,
       type: classified.type,
       source: 'release-private',
+      repo: repoFullName(repo),
+    }
+  }
+
+  // Public FINAL releases get no release-published post: the binary-poll
+  // announcement gates on this release existing and follows with strictly
+  // more (install commands, breaking/surface report, tweet), so this post
+  // only duplicated it minutes earlier. RC/beta releases keep posting —
+  // they never get a binary post.
+  if (classified.type === VersionType.FINAL) {
+    deps.logger.info(
+      'Public final release published — deferring to binary-poll announcement',
+      { tag: tagName }
+    )
+    return {
+      action: 'ignored',
+      reason: 'final release — binary poll owns the announcement',
+      version: classified.raw,
+      type: classified.type,
+      source: 'release',
       repo: repoFullName(repo),
     }
   }
