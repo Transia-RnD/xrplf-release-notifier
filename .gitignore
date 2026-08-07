@@ -12,3 +12,6 @@ tasks
 observatory/terraform/.terraform/
 observatory/terraform/*.tfstate*
 observatory/terraform/terraform.tfvars
+
+# local SMS roster (encrypted, but still PII-adjacent)
+.sms-roster.json
