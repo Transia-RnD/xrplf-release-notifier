@@ -21,6 +21,7 @@ import {
 } from '../ai/breaking'
 import type { BreakingResult } from '../ai/breaking'
 import type { TagBreakingLevel } from '../notifications/mattermost'
+import { mirrorToSlack } from '../notifications/slack'
 import type { AppConfig } from '../config'
 import type { RepoConfig } from '../github/repos'
 import { findRepoByFullName, repoFullName } from '../github/repos'
@@ -442,4 +443,5 @@ export async function sendNotifications(
       error: getErrorMessage(err),
     })
   }
+  await mirrorToSlack(config.slackWebhookUrl, mattermostPayload, logger)
 }

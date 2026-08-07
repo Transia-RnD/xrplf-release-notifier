@@ -11,6 +11,8 @@ export interface AppConfig {
   githubWebhookSecret: string
   githubToken?: string
   mattermostWebhookUrl: string
+  /** Slack incoming webhook; notifications mirror there when set. */
+  slackWebhookUrl?: string
   twitterApiKey: string
   twitterApiSecret: string
   twitterAccessToken: string
@@ -30,6 +32,7 @@ interface AppSecrets {
   GITHUB_WEBHOOK_SECRET: string
   GITHUB_TOKEN?: string
   MATTERMOST_WEBHOOK_URL: string
+  SLACK_WEBHOOK_URL?: string
   TWITTER_API_KEY: string
   TWITTER_API_SECRET: string
   TWITTER_ACCESS_TOKEN: string
@@ -60,6 +63,7 @@ export async function loadConfig(): Promise<AppConfig> {
     githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET ?? '',
     githubToken: process.env.GITHUB_TOKEN,
     mattermostWebhookUrl: process.env.MATTERMOST_WEBHOOK_URL ?? '',
+    slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
     twitterApiKey: process.env.TWITTER_API_KEY ?? '',
     twitterApiSecret: process.env.TWITTER_API_SECRET ?? '',
     twitterAccessToken: process.env.TWITTER_ACCESS_TOKEN ?? '',
@@ -97,6 +101,7 @@ async function loadFromSecretManager(
     githubWebhookSecret: secrets.GITHUB_WEBHOOK_SECRET,
     githubToken: secrets.GITHUB_TOKEN,
     mattermostWebhookUrl: secrets.MATTERMOST_WEBHOOK_URL,
+    slackWebhookUrl: secrets.SLACK_WEBHOOK_URL,
     twitterApiKey: secrets.TWITTER_API_KEY,
     twitterApiSecret: secrets.TWITTER_API_SECRET,
     twitterAccessToken: secrets.TWITTER_ACCESS_TOKEN,

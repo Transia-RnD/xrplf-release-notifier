@@ -6,6 +6,7 @@ import { VersionType } from '../version/types'
 import { finalTagExists } from '../version/predecessor'
 import { postToMattermost } from '../notifications/mattermost'
 import type { MattermostPayload } from '../notifications/mattermost'
+import { mirrorToSlack } from '../notifications/slack'
 import { loadParityConfig } from './sdks'
 import type { SdkTarget } from './sdks'
 import { buildReference, fullTypeChecklist, deltaChecklist } from './reference'
@@ -178,6 +179,7 @@ export async function runParityCheck(
         })
       } else {
         await postToMattermost(config.mattermostWebhookUrl, payloads.sdk)
+        await mirrorToSlack(config.slackWebhookUrl, payloads.sdk, logger)
         logger.info('Parity report posted', { tag, sdks: sdks.length, behind })
       }
     }
@@ -198,6 +200,7 @@ export async function runParityCheck(
         payloads.docs = docsPayload
         if (!opts.dryRun) {
           await postToMattermost(config.mattermostWebhookUrl, docsPayload)
+          await mirrorToSlack(config.slackWebhookUrl, docsPayload, logger)
           logger.info('Docs parity report posted', { tag, mode })
         }
       }
