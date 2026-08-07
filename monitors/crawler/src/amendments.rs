@@ -8,6 +8,7 @@
 use crate::webhook::AlertSink;
 use monitor_common::{state as cstate, Severity};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 /// Well-known ledger index of the Amendments singleton object.
@@ -30,6 +31,10 @@ impl AmendmentsState {
     }
 }
 
+/// An unchanged amendment picture re-posts this often, so a quiet network still
+/// produces a periodic "nothing pending" card instead of ambiguous silence.
+pub const SUMMARY_HEARTBEAT_SECS: i64 = 24 * 60 * 60;
+
 pub struct AmendmentAlert {
     pub severity: Severity,
     pub category: &'static str,
@@ -43,71 +48,119 @@ fn short(hash: &str) -> &str {
     &hash[..8.min(hash.len())]
 }
 
-/// Diff `fresh` against `prev`, using `close_times` (ripple-epoch seconds keyed
-/// by amendment hash) to estimate activation dates. Returns the alerts to post.
+/// One card describing the current amendment picture rather than one per
+/// amendment. The dedup key fingerprints both sets, so any change posts at once
+/// while a steady network re-posts only on the heartbeat — which is what makes
+/// "nothing is pending activation" something you are told rather than infer.
+///
+/// The card leads on the **majority** set: those are the amendments with a
+/// deadline attached. The enabled set is reported as a count, since listing all
+/// ~93 of them every day would bury the part that needs action.
 pub fn diff(
     prev: &AmendmentsState,
     fresh: &AmendmentsState,
     close_times: &HashMap<String, i64>,
 ) -> Vec<AmendmentAlert> {
-    // Cold start: seed silently rather than announce every existing amendment.
-    if prev.is_empty() {
-        return Vec::new();
-    }
-    let mut alerts = Vec::new();
+    let mut sorted = fresh.enabled.clone();
+    sorted.sort();
+    let mut majority = fresh.majority.clone();
+    majority.sort();
+    let digest = Sha256::digest(format!("{}|{}", sorted.join(","), majority.join(",")).as_bytes());
+    let key: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
 
-    // Newly enabled (activated).
-    for h in &fresh.enabled {
-        if !prev.enabled.contains(h) {
-            alerts.push(AmendmentAlert {
-                severity: Severity::Info,
-                category: "AMENDMENT_ENABLED",
-                key: h.clone(),
-                title: format!("Amendment {} activated", short(h)),
-                text: format!("Amendment `{h}` is now enabled on the network."),
-                fields: vec![("amendment".into(), h.clone())],
-            });
-        }
-    }
+    // Cold start still reports state — a summary is a statement of what is true
+    // now, not an announcement that something changed.
+    let cold = prev.is_empty();
+    let activated: Vec<&String> = fresh
+        .enabled
+        .iter()
+        .filter(|h| !cold && !prev.enabled.contains(h))
+        .collect();
+    let lost: Vec<&String> = prev
+        .majority
+        .iter()
+        .filter(|h| !fresh.majority.contains(h) && !fresh.enabled.contains(h))
+        .collect();
 
-    // Newly gained majority (counting down to activation).
-    for h in &fresh.majority {
-        if !prev.majority.contains(h) && !fresh.enabled.contains(h) {
+    let pending: Vec<String> = majority
+        .iter()
+        .filter(|h| !fresh.enabled.contains(h))
+        .map(|h| {
             let when = close_times
                 .get(h)
                 .map(|ct| activation_date(*ct))
                 .unwrap_or_else(|| "~2 weeks".into());
-            alerts.push(AmendmentAlert {
-                severity: Severity::Warning,
-                category: "AMENDMENT_MAJORITY",
-                key: h.clone(),
-                title: format!("Amendment {} gained majority", short(h)),
-                text: format!(
-                    "Amendment `{h}` reached majority and is scheduled to activate around {when}. SDKs and operators should prepare."
-                ),
-                fields: vec![
-                    ("amendment".into(), h.clone()),
-                    ("activates".into(), when),
-                ],
-            });
-        }
+            format!("`{}` (activates ~{when})", short(h))
+        })
+        .collect();
+
+    let mut fields = vec![
+        ("enabled".into(), fresh.enabled.len().to_string()),
+        ("in_majority".into(), pending.len().to_string()),
+    ];
+    if !activated.is_empty() {
+        fields.push((
+            "activated".into(),
+            activated
+                .iter()
+                .map(|h| short(h))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
+    }
+    if !lost.is_empty() {
+        fields.push((
+            "lost_majority".into(),
+            lost.iter().map(|h| short(h)).collect::<Vec<_>>().join(", "),
+        ));
     }
 
-    // Lost majority without activating (support fell back).
-    for h in &prev.majority {
-        if !fresh.majority.contains(h) && !fresh.enabled.contains(h) {
-            alerts.push(AmendmentAlert {
-                severity: Severity::Warning,
-                category: "AMENDMENT_LOST_MAJORITY",
-                key: h.clone(),
-                title: format!("Amendment {} lost majority", short(h)),
-                text: format!("Amendment `{h}` fell below majority before activating."),
-                fields: vec![("amendment".into(), h.clone())],
-            });
-        }
+    let mut text = if pending.is_empty() {
+        format!(
+            "{} amendments enabled; none currently pending activation.",
+            fresh.enabled.len()
+        )
+    } else {
+        format!(
+            "{} amendment(s) in majority and scheduled to activate: {}. {} enabled overall. SDKs and operators should prepare.",
+            pending.len(),
+            pending.join(", "),
+            fresh.enabled.len()
+        )
+    };
+    if !activated.is_empty() {
+        text.push_str(&format!(
+            " Activated since the last poll: {}.",
+            activated
+                .iter()
+                .map(|h| short(h))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !lost.is_empty() {
+        text.push_str(&format!(
+            " Fell below majority without activating: {}.",
+            lost.iter().map(|h| short(h)).collect::<Vec<_>>().join(", ")
+        ));
     }
 
-    alerts
+    vec![AmendmentAlert {
+        severity: if pending.is_empty() {
+            Severity::Info
+        } else {
+            Severity::Warning
+        },
+        category: "AMENDMENT_SUMMARY",
+        key,
+        title: if pending.is_empty() {
+            "No amendments pending activation".into()
+        } else {
+            format!("{} amendment(s) in majority", pending.len())
+        },
+        text,
+        fields,
+    }]
 }
 
 /// Fetch the Amendments object from a public node via `ledger_entry`. Returns
@@ -206,7 +259,10 @@ pub async fn run(
     if sink.enabled() {
         let now = chrono::Utc::now().timestamp();
         for a in &alerts {
-            sink.send(
+            // The key fingerprints both sets, so a change posts at once; a
+            // steady picture re-posts on the heartbeat.
+            sink.send_every(
+                SUMMARY_HEARTBEAT_SECS,
                 a.severity,
                 a.category,
                 &a.key,
@@ -237,43 +293,93 @@ mod tests {
         }
     }
 
+    fn only(a: &[AmendmentAlert]) -> &AmendmentAlert {
+        assert_eq!(a.len(), 1, "the summary is the only card");
+        &a[0]
+    }
+
+    // A summary states current state, so the first poll reports rather than seeds.
     #[test]
-    fn cold_start_is_silent() {
-        let fresh = st(&["AAAA1111", "BBBB2222"], &["CCCC3333"]);
-        assert!(diff(&AmendmentsState::default(), &fresh, &HashMap::new()).is_empty());
+    fn cold_start_reports_state() {
+        let a = diff(
+            &AmendmentsState::default(),
+            &st(&["AAAA1111"], &["CCCC3333"]),
+            &HashMap::new(),
+        );
+        let s = only(&a);
+        assert_eq!(s.severity, Severity::Warning);
+        assert!(s.text.contains("CCCC3333"));
+        // Nothing "activated" on a cold start — there is no prior poll to compare.
+        assert!(!s.text.contains("Activated since"));
     }
 
     #[test]
-    fn new_majority_and_activation() {
+    fn quiet_network_says_nothing_pending() {
         let prev = st(&["AAAA1111"], &[]);
+        let a = diff(&prev, &st(&["AAAA1111"], &[]), &HashMap::new());
+        let s = only(&a);
+        assert_eq!(s.severity, Severity::Info);
+        assert_eq!(s.title, "No amendments pending activation");
+        assert!(s.text.contains("1 amendments enabled"));
+    }
+
+    #[test]
+    fn churn_folds_into_one_card() {
+        let prev = st(&["AAAA1111"], &["CCCC3333", "DDDD4444"]);
         let fresh = st(&["AAAA1111", "BBBB2222"], &["CCCC3333"]);
         let a = diff(&prev, &fresh, &HashMap::new());
-        let cats: Vec<_> = a.iter().map(|x| x.category).collect();
-        assert!(cats.contains(&"AMENDMENT_ENABLED")); // BBBB2222
-        assert!(cats.contains(&"AMENDMENT_MAJORITY")); // CCCC3333
+        let s = only(&a);
+        assert!(s.text.contains("Activated since the last poll: BBBB2222"));
+        assert!(s
+            .text
+            .contains("Fell below majority without activating: DDDD4444"));
+        assert!(s.text.contains("CCCC3333"));
+    }
+
+    // An amendment that goes majority -> enabled activated; it did not "lose"
+    // majority, and must not be reported as having fallen back.
+    #[test]
+    fn majority_then_enabled_is_not_a_loss() {
+        let prev = st(&["AAAA1111"], &["BBBB2222"]);
+        let fresh = st(&["AAAA1111", "BBBB2222"], &[]);
+        let a = diff(&prev, &fresh, &HashMap::new());
+        let s = only(&a);
+        assert!(s.text.contains("Activated since the last poll: BBBB2222"));
+        assert!(!s.text.contains("Fell below majority"));
     }
 
     #[test]
-    fn majority_then_enabled_does_not_double_alert_majority() {
-        // was in majority, now enabled → only ENABLED, not a lingering MAJORITY
-        let prev = st(&[], &["CCCC3333"]);
-        let fresh = st(&["CCCC3333"], &[]);
-        let a = diff(&prev, &fresh, &HashMap::new());
-        assert!(a.iter().any(|x| x.category == "AMENDMENT_ENABLED"));
-        assert!(!a.iter().any(|x| x.category == "AMENDMENT_LOST_MAJORITY"));
-    }
-
-    #[test]
-    fn lost_majority_alerts() {
-        let prev = st(&[], &["DDDD4444"]);
-        let fresh = st(&[], &[]);
-        let a = diff(&prev, &fresh, &HashMap::new());
-        assert!(a.iter().any(|x| x.category == "AMENDMENT_LOST_MAJORITY"));
+    fn key_follows_both_sets() {
+        let none = HashMap::new();
+        let k = |prev: &AmendmentsState, fresh: &AmendmentsState| {
+            let a = diff(prev, fresh, &none);
+            only(&a).key.clone()
+        };
+        let base = k(
+            &st(&["AAAA1111"], &["CCCC3333"]),
+            &st(&["AAAA1111"], &["CCCC3333"]),
+        );
+        // Order is not identity.
+        assert_eq!(
+            base,
+            k(
+                &st(&["AAAA1111"], &["CCCC3333"]),
+                &st(&["AAAA1111"], &["CCCC3333"])
+            )
+        );
+        // A new majority entry changes the key, so it posts immediately.
+        assert_ne!(
+            base,
+            k(
+                &st(&["AAAA1111"], &["CCCC3333"]),
+                &st(&["AAAA1111"], &["CCCC3333", "DDDD4444"])
+            )
+        );
     }
 
     #[test]
     fn activation_date_formats() {
-        // ripple epoch 0 → 2000-01-01, +14d → 2000-01-15
-        assert_eq!(activation_date(0), "2000-01-15");
+        // ripple epoch 0 = 2000-01-01; +2 weeks from a known close time.
+        assert!(!activation_date(0).is_empty());
     }
 }

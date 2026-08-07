@@ -74,14 +74,19 @@ next security release becomes the floor.
 
 ## crawler `amendments` — on-ledger amendment tracking (periodic, observatory VM)
 
-Polls a public node's `ledger_entry` for the Amendments object and diffs the
-enabled + majority sets. Cold start (no prior state) seeds silently.
+Polls a public node's `ledger_entry` for the Amendments object and reports the
+current picture. Cold start reports state rather than seeding silently.
 
 | Alert | Severity | Fires when | Dedup |
 |-------|----------|-----------|-------|
-| `AMENDMENT_MAJORITY` | WARNING | An amendment reaches majority (activation ~2 weeks out) | per amendment, 24h |
-| `AMENDMENT_ENABLED` | INFO | An amendment activates on the network | per amendment, 24h |
-| `AMENDMENT_LOST_MAJORITY` | WARNING | An amendment falls below majority before activating | per amendment, 24h |
+| `AMENDMENT_SUMMARY` | INFO (nothing pending) / WARNING (any in majority) | Every poll: one card naming the amendments in majority with their activation dates, plus anything activated or fallen below majority since the last poll | key fingerprints both sets — a change posts immediately, a steady picture re-posts every 24h |
+
+Replaces the per-amendment `AMENDMENT_MAJORITY` / `AMENDMENT_ENABLED` /
+`AMENDMENT_LOST_MAJORITY` events, for the same reason as `NUNL_SUMMARY`: they were
+edge-triggered, so a settled network emitted nothing and silence could not be told
+apart from a broken poller. The card leads on the **majority** set because those
+are the amendments with a deadline attached; the enabled set is a count, since
+listing all ~93 daily would bury the part that needs action.
 
 ## crawler `nunl` — Negative UNL tracking (periodic, observatory VM)
 
