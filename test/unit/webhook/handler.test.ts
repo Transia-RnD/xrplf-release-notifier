@@ -64,6 +64,7 @@ const mockConfig: AppConfig = {
   twitterAccessToken: 'token',
   twitterAccessTokenSecret: 'access-secret',
   anthropicApiKey: 'test-anthropic-key',
+  twitterPostingEnabled: false,
   gcpProjectId: 'test',
   alphanetSyncDebounceMinutes: 30,
 }

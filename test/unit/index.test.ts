@@ -376,13 +376,46 @@ describe('handlePoll', () => {
     await handlePoll(
       mockReq({ headers: { 'x-cloud-scheduler-token': 'poll-tok' }, body: {} }),
       asRes(res),
-      cfg(),
+      cfg({ twitterPostingEnabled: true }),
       storage
     )
 
     expect(send).toHaveBeenCalled()
     expect(tweet).toHaveBeenCalled()
     expect(save).toHaveBeenCalled()
+    expect(res.body).toMatchObject({ action: 'notified', version: '3.1.3' })
+  })
+
+  it('skips Twitter when posting is disabled, still posts Mattermost', async () => {
+    jest.spyOn(state, 'loadPollerState').mockResolvedValue({
+      deb: { version: '3.1.2', detectedAt: 'x' },
+      rpm: null,
+    })
+    jest
+      .spyOn(binaryChecker, 'fetchLatestBinaryVersions')
+      .mockResolvedValue({ deb: '3.1.3', rpm: '3.1.3' })
+    jest.spyOn(binaryChecker, 'detectNewVersions').mockReturnValue('3.1.3')
+    jest
+      .spyOn(client, 'fetchReleaseBody')
+      .mockResolvedValue('release notes body')
+    jest
+      .spyOn(summarizer, 'summarizeReleaseByTag')
+      .mockResolvedValue({ mattermost: '• thing', twitter: 'live now' })
+    const send = jest.spyOn(handler, 'sendNotifications').mockResolvedValue()
+    jest.spyOn(card, 'renderReleaseCard').mockResolvedValue(Buffer.from('png'))
+    const tweet = jest.spyOn(twitter, 'postToTwitter').mockResolvedValue()
+    jest.spyOn(state, 'savePollerState').mockResolvedValue()
+    const res = mockRes()
+
+    await handlePoll(
+      mockReq({ headers: { 'x-cloud-scheduler-token': 'poll-tok' }, body: {} }),
+      asRes(res),
+      cfg({ twitterPostingEnabled: false }),
+      storage
+    )
+
+    expect(send).toHaveBeenCalled()
+    expect(tweet).not.toHaveBeenCalled()
     expect(res.body).toMatchObject({ action: 'notified', version: '3.1.3' })
   })
 

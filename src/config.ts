@@ -16,6 +16,8 @@ export interface AppConfig {
   twitterAccessToken: string
   twitterAccessTokenSecret: string
   anthropicApiKey: string
+  /** Master switch for posting to Twitter; off unless TWITTER_POSTING_ENABLED=true. */
+  twitterPostingEnabled: boolean
   pollerToken?: string
   gcpProjectId: string
   /** Sentinel endpoint for alphanet Stage-1 branch syncs; feature off when unset. */
@@ -63,6 +65,7 @@ export async function loadConfig(): Promise<AppConfig> {
     twitterAccessToken: process.env.TWITTER_ACCESS_TOKEN ?? '',
     twitterAccessTokenSecret: process.env.TWITTER_ACCESS_TOKEN_SECRET ?? '',
     anthropicApiKey: requireEnv('ANTHROPIC_API_KEY'),
+    twitterPostingEnabled: process.env.TWITTER_POSTING_ENABLED === 'true',
     pollerToken: process.env.POLLER_TOKEN,
     gcpProjectId,
     alphanetSyncUrl: process.env.ALPHANET_SYNC_URL,
@@ -99,6 +102,7 @@ async function loadFromSecretManager(
     twitterAccessToken: secrets.TWITTER_ACCESS_TOKEN,
     twitterAccessTokenSecret: secrets.TWITTER_ACCESS_TOKEN_SECRET,
     anthropicApiKey: secrets.ANTHROPIC_API_KEY,
+    twitterPostingEnabled: process.env.TWITTER_POSTING_ENABLED === 'true',
     pollerToken: secrets.POLLER_TOKEN,
     gcpProjectId,
     alphanetSyncUrl: process.env.ALPHANET_SYNC_URL,

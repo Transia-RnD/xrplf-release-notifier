@@ -477,7 +477,7 @@ export async function handlePoll(
       contentRepo: repoFullName(contentRepo),
       wouldPostMattermost: true,
       mattermost: mattermostPayload,
-      wouldTweet: twitterConfigured(config),
+      wouldTweet: config.twitterPostingEnabled && twitterConfigured(config),
       tweet: tweetText,
       tweetChars: tweetText.length,
       releaseCard,
@@ -493,8 +493,8 @@ export async function handlePoll(
 
   // Twitter announcement — the only place we post to Twitter. Includes the
   // version-stamped release card image and a release-notes link appended
-  // to the AI-generated tweet body.
-  if (twitterConfigured(config)) {
+  // to the AI-generated tweet body. Gated behind TWITTER_POSTING_ENABLED.
+  if (config.twitterPostingEnabled && twitterConfigured(config)) {
     try {
       const cardPng = await renderReleaseCard(newVersion)
       await postToTwitter(
@@ -514,7 +514,7 @@ export async function handlePoll(
       })
     }
   } else {
-    logger.info('Twitter not configured — skipping post', {
+    logger.info('Twitter posting disabled or not configured — skipping post', {
       tweet: summary.twitter,
     })
   }

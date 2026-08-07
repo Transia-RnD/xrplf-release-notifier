@@ -21,6 +21,7 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     twitterAccessToken: '',
     twitterAccessTokenSecret: '',
     anthropicApiKey: 'k',
+    twitterPostingEnabled: false,
     gcpProjectId: '',
     alphanetSyncUrl: 'https://sentinel.example/v1/alphanet/sync',
     alphanetSyncSecret: 'shhh',

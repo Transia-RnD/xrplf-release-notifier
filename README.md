@@ -9,7 +9,7 @@ A single rippled release fires through several upstream events (tag push, GitHub
 Two channels, very different rules:
 
 - **Mattermost** posts on **every** supported event. Duplicate signals are preferable to silent misses when maintainer workflow varies. Internal channel, signal-rich.
-- **Twitter** posts **once per FINAL release**, only when the `.deb`/`.rpm` lands on `pool/stable/` (the "install now" moment). Tag pushes, RC release publishes, anything from xrpld-private — none of them tweet. The tweet includes the version-stamped release card PNG (`assets/release-card-template.svg` → 1200×675 PNG via `@resvg/resvg-js`) plus a `Release notes:` link.
+- **Twitter** posts **once per FINAL release**, only when the `.deb`/`.rpm` lands on `pool/stable/` (the "install now" moment). Tag pushes, RC release publishes, anything from xrpld-private — none of them tweet. The tweet includes the version-stamped release card PNG (`assets/release-card-template.svg` → 1200×675 PNG via `@resvg/resvg-js`) plus a `Release notes:` link. Posting is additionally gated behind `TWITTER_POSTING_ENABLED=true` — **currently off** while the AI-generated copy isn't accurate enough to publish unreviewed.
 
 See the [delivery matrix](#delivery-matrix) for the full rules.
 
