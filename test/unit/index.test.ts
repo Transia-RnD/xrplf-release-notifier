@@ -3,7 +3,7 @@ import {
   handleWebhook,
   handleParity,
   handlePoll,
-  maybeTriggerParity,
+  triggerParityForRelease,
   twitterConfigured,
 } from '../../src/index'
 import type { AppConfig } from '../../src/config'
@@ -104,7 +104,7 @@ describe('handleWebhook', () => {
     expect(res.body).toEqual({ action: 'pong' })
   })
 
-  it('dispatches a push event and triggers parity for a public tag', async () => {
+  it('dispatches a push event WITHOUT triggering parity (binary poll owns it)', async () => {
     jest.spyOn(verify, 'verifySignature').mockReturnValue(true)
     jest.spyOn(handler, 'handlePushEvent').mockResolvedValue({
       action: 'notified',
@@ -125,12 +125,7 @@ describe('handleWebhook', () => {
     )
 
     expect(handler.handlePushEvent).toHaveBeenCalled()
-    expect(trig).toHaveBeenCalledWith(
-      expect.any(String),
-      'poll-tok',
-      '3.2.0',
-      expect.anything()
-    )
+    expect(trig).not.toHaveBeenCalled()
     expect(res.statusCode).toBe(200)
   })
 
@@ -172,25 +167,16 @@ describe('handleWebhook', () => {
   })
 })
 
-describe('maybeTriggerParity', () => {
-  it('triggers for a public tag/release with a version', () => {
+describe('triggerParityForRelease', () => {
+  it('dispatches the parity job for the released version', () => {
     const trig = jest.spyOn(trigger, 'triggerParityCheck').mockResolvedValue()
-    maybeTriggerParity(
-      { source: 'release', version: '3.2.0' },
-      mockReq(),
-      cfg()
+    triggerParityForRelease('3.2.0', mockReq(), cfg())
+    expect(trig).toHaveBeenCalledWith(
+      expect.any(String),
+      'poll-tok',
+      '3.2.0',
+      expect.anything()
     )
-    expect(trig).toHaveBeenCalled()
-  })
-  it('does not trigger for the private mirror or a missing version', () => {
-    const trig = jest.spyOn(trigger, 'triggerParityCheck').mockResolvedValue()
-    maybeTriggerParity(
-      { source: 'tag-private', version: '3.2.0' },
-      mockReq(),
-      cfg()
-    )
-    maybeTriggerParity({ source: 'tag' }, mockReq(), cfg())
-    expect(trig).not.toHaveBeenCalled()
   })
 })
 
@@ -264,6 +250,21 @@ describe('twitterConfigured', () => {
 })
 
 describe('handlePoll', () => {
+  // The breaking/surface scan hits GitHub + the AI — stub it for every poll
+  // test; the composed-section rendering is covered by the handler tests.
+  beforeEach(() => {
+    jest.spyOn(trigger, 'triggerParityCheck').mockResolvedValue()
+    jest.spyOn(handler, 'detectBreakingSafe').mockResolvedValue({
+      breakingNow: '',
+      newSurface: '',
+      unvotableAmendments: '',
+      hasBreakingNow: false,
+      hasNewSurface: false,
+      hasUnvotableAmendment: false,
+      amendmentNames: [],
+    })
+  })
+
   it('401s on a bad poller token', async () => {
     const res = mockRes()
     await handlePoll(

@@ -15,7 +15,10 @@ import {
   summarizeBody,
   MIN_RELEASE_BODY_CHARS,
 } from '../ai/summarizer'
-import { summarizeBreakingForTag } from '../ai/breaking'
+import {
+  summarizeBreakingForTag,
+  composeBreakingSections,
+} from '../ai/breaking'
 import type { BreakingResult } from '../ai/breaking'
 import type { TagBreakingLevel } from '../notifications/mattermost'
 import type { AppConfig } from '../config'
@@ -192,23 +195,9 @@ async function handleTagPush(
     detectBreakingSafe(tagName, repo, deps),
   ])
 
-  const parts: string[] = []
-  if (breaking.breakingNow) {
-    parts.push(
-      `**:rotating_light: Breaking on upgrade:**\n${breaking.breakingNow}`
-    )
-  }
-  if (breaking.newSurface) {
-    parts.push(
-      `**:sparkles: New protocol surface — SDKs must add support:**\n${breaking.newSurface}`
-    )
-  }
-  if (breaking.unvotableAmendments) {
-    parts.push(
-      `**:warning: Added but NOT votable — don't claim support:**\n${breaking.unvotableAmendments}`
-    )
-  }
-  const body = [...parts, summary.mattermost].join('\n\n')
+  const body = [...composeBreakingSections(breaking), summary.mattermost].join(
+    '\n\n'
+  )
   const level: TagBreakingLevel = breaking.hasBreakingNow
     ? 'breaking'
     : breaking.hasNewSurface || breaking.hasUnvotableAmendment
@@ -355,7 +344,7 @@ export async function handleReleaseEvent(
  * "no breaking changes" result. A GitHub/AI error here must degrade the post
  * (drop the breaking section) rather than fail the whole tag notification.
  */
-async function detectBreakingSafe(
+export async function detectBreakingSafe(
   tag: string,
   repo: RepoConfig,
   deps: HandlerDeps
@@ -382,6 +371,7 @@ async function detectBreakingSafe(
       hasBreakingNow: false,
       hasNewSurface: false,
       hasUnvotableAmendment: false,
+      amendmentNames: [],
     }
   }
 }

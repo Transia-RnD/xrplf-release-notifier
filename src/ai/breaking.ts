@@ -80,6 +80,38 @@ export interface BreakingResult {
   hasBreakingNow: boolean
   hasNewSurface: boolean
   hasUnvotableAmendment: boolean
+  /**
+   * Raw names of the votable amendments added this release (deduped, no
+   * markdown). Feeds the tweet's exhaustive amendment list; unvotable
+   * (Supported::No) amendments are deliberately excluded — never claim
+   * support the network can't enable.
+   */
+  amendmentNames: string[]
+}
+
+/**
+ * Render a BreakingResult into its Mattermost sections, in display order.
+ * Shared by the tag-push and binary-poll paths so both posts carry the same
+ * deterministic listing.
+ */
+export function composeBreakingSections(breaking: BreakingResult): string[] {
+  const parts: string[] = []
+  if (breaking.breakingNow) {
+    parts.push(
+      `**:rotating_light: Breaking on upgrade:**\n${breaking.breakingNow}`
+    )
+  }
+  if (breaking.newSurface) {
+    parts.push(
+      `**:sparkles: New protocol surface — SDKs must add support:**\n${breaking.newSurface}`
+    )
+  }
+  if (breaking.unvotableAmendments) {
+    parts.push(
+      `**:warning: Added but NOT votable — don't claim support:**\n${breaking.unvotableAmendments}`
+    )
+  }
+  return parts
 }
 
 const NO_BREAKING: BreakingResult = {
@@ -89,6 +121,7 @@ const NO_BREAKING: BreakingResult = {
   hasBreakingNow: false,
   hasNewSurface: false,
   hasUnvotableAmendment: false,
+  amendmentNames: [],
 }
 
 /** New protocol surface (cumulative vs the last stable release), from buildReference. */
@@ -175,6 +208,7 @@ export async function detectBreakingChanges(
     hasBreakingNow: breakingNow.length > 0,
     hasNewSurface: newSurface.length > 0,
     hasUnvotableAmendment: unvotableAmendments.length > 0,
+    amendmentNames: dedupe(surface.addedAmendments),
   }
 }
 

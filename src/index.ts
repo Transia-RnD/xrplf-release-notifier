@@ -10,6 +10,7 @@ import {
   handlePushEvent,
   handleReleaseEvent,
   sendNotifications,
+  detectBreakingSafe,
 } from './webhook/handler'
 import {
   fetchLatestBinaryVersions,
@@ -21,6 +22,7 @@ import type { VersionInfo } from './version/types'
 import { NotificationSource, VersionType } from './version/types'
 import { formatMattermost } from './notifications/mattermost'
 import { summarizeReleaseByTag } from './ai/summarizer'
+import { composeBreakingSections } from './ai/breaking'
 import { fetchReleaseBody } from './github/client'
 import { PUBLIC_REPO, repoFullName } from './github/repos'
 import { renderReleaseCard } from './notifications/release-card'
@@ -166,13 +168,11 @@ export async function handleWebhook(
   }
   if (event === 'push') {
     const result = await handlePushEvent(payload, deps)
-    maybeTriggerParity(result, req, config)
     res.status(200).json(result)
     return
   }
   if (event === 'release') {
     const result = await handleReleaseEvent(payload, deps)
-    maybeTriggerParity(result, req, config)
     res.status(200).json(result)
     return
   }
@@ -180,25 +180,23 @@ export async function handleWebhook(
 }
 
 /**
- * Kick off a parity check for public tag-push / release-publish events. Only
- * the public-repo paths (source 'tag' / 'release') are parity-checked — never
- * the private mirror's embargoed tags. Fire-and-forget: the webhook must return
- * fast, so we don't await the scan.
+ * Kick off the SDK/docs parity report. Fired ONCE per version, from the
+ * binary-poll path only — when the packages are installable and the public
+ * Release exists, so "released — NOT at parity" is true when posted. The
+ * webhook paths no longer trigger it: tag + release-publish each firing gave
+ * every final two identical parity posts, hours before anything shipped.
+ * Fire-and-forget: the parity scan runs an agent per SDK and far outlives
+ * this request.
  */
-export function maybeTriggerParity(
-  result: { source?: string; version?: string },
+export function triggerParityForRelease(
+  version: string,
   req: Request,
   config: AppConfig
 ): void {
-  if (
-    (result.source === 'tag' || result.source === 'release') &&
-    result.version
-  ) {
-    const baseUrl =
-      process.env.SELF_URL ??
-      `${req.protocol}://${req.get('host') ?? `localhost:${config.port}`}`
-    void triggerParityCheck(baseUrl, config.pollerToken, result.version, logger)
-  }
+  const baseUrl =
+    process.env.SELF_URL ??
+    `${req.protocol}://${req.get('host') ?? `localhost:${config.port}`}`
+  void triggerParityCheck(baseUrl, config.pollerToken, version, logger)
 }
 
 export async function handleParity(
@@ -433,6 +431,17 @@ export async function handlePoll(
   // identity. (`PUBLIC_REPO` drives dedup + visibility.)
   const contentRepo = PUBLIC_REPO
 
+  // The diff-based breaking/surface scan runs FIRST — the same machinery as
+  // the tag path — so both posts carry the full deterministic protocol-surface
+  // listing (every amendment / tx type / ledger object) instead of the AI's
+  // condensed rewrite of the release notes, and the tweet gets the
+  // authoritative amendment list to name verbatim. The scan degrades to empty
+  // sections on failure; the summary throws.
+  const breaking = await detectBreakingSafe(newVersion, PUBLIC_REPO, {
+    config,
+    storage,
+    logger,
+  })
   const summary = await summarizeReleaseByTag({
     owner: contentRepo.owner,
     repo: contentRepo.name,
@@ -442,14 +451,21 @@ export async function handlePoll(
     logger,
     // The binary-poll path is the ONLY place we tweet — finals on stable.
     includeTwitter: true,
+    // The diff-based detector owns the breaking sections on this path.
+    labelBreaking: false,
+    amendments: breaking.amendmentNames,
   })
 
   // Assemble both payloads once — the live path and the dry-run report share
   // them, so what a dry-run shows is byte-for-byte what prod would send.
+  const mattermostBody = [
+    ...composeBreakingSections(breaking),
+    summary.mattermost,
+  ].join('\n\n')
   const mattermostPayload = formatMattermost(
     versionInfo,
     NotificationSource.BINARY_POLL,
-    summary.mattermost,
+    mattermostBody,
     PUBLIC_REPO
   )
   const releaseNotesUrl = `https://github.com/${repoFullName(PUBLIC_REPO)}/releases/tag/${newVersion}`
@@ -527,6 +543,9 @@ export async function handlePoll(
     state.rpm = { version: current.rpm, detectedAt: now }
   }
   await savePollerState(storage, state)
+
+  // The one parity trigger — the version is now genuinely released.
+  triggerParityForRelease(newVersion, req, config)
 
   logger.info('Binary poll detected new version', { version: newVersion })
   res.status(200).json({ action: 'notified', version: newVersion })

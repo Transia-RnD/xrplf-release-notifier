@@ -214,13 +214,13 @@ describe('summarizeReleaseByTag', () => {
     expect(sentContent).not.toContain('clang-format')
   })
 
-  it('throws when AI returns a tweet over 280 chars', async () => {
+  it('throws when AI returns a tweet over the 500-char sanity cap', async () => {
     mockedClient.fetchReleaseBody.mockResolvedValue(
       'Long enough release body content here.'
     )
     mockCreate.mockReturnValueOnce(aiResponse('• Good bullets'))
     // Simulate Claude ignoring the length limit
-    mockCreate.mockReturnValueOnce(aiResponse('x'.repeat(300)))
+    mockCreate.mockReturnValueOnce(aiResponse('x'.repeat(600)))
 
     await expect(
       summarizeReleaseByTag({

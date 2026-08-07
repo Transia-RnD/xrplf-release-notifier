@@ -24,9 +24,16 @@ jest.mock('../../../src/ai/summarizer', () => ({
   summarizeReleaseByTag: jest.fn(),
   summarizeBody: jest.fn(),
 }))
-jest.mock('../../../src/ai/breaking', () => ({
-  summarizeBreakingForTag: jest.fn(),
-}))
+jest.mock('../../../src/ai/breaking', () => {
+  // Real composer — the section-rendering assertions below exercise it.
+  const actual = jest.requireActual<{
+    composeBreakingSections: (b: unknown) => string[]
+  }>('../../../src/ai/breaking')
+  return {
+    summarizeBreakingForTag: jest.fn(),
+    composeBreakingSections: actual.composeBreakingSections,
+  }
+})
 
 const MOCK_SUMMARIES = {
   mattermost: '**What changed:**\n• mock bullet',

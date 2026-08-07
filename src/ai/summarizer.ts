@@ -7,10 +7,14 @@ import { findPredecessorTag } from '../version/predecessor'
 
 export const MODEL = 'claude-haiku-4-5'
 const MAX_TOKENS_MATTERMOST = 1024
-const MAX_TOKENS_TWITTER = 200
+const MAX_TOKENS_TWITTER = 300
 
-/** Twitter's hard limit. Reject AI outputs longer than this. */
-const TWITTER_MAX_CHARS = 280
+/**
+ * Sanity cap on the AI tweet body. Above X's classic 280 because the complete
+ * amendment list is never dropped for length (the account can post long-form);
+ * the prompt still targets ~200 chars. This only catches runaway outputs.
+ */
+const TWITTER_MAX_CHARS = 500
 /** Don't summarize tiny release bodies — they're usually just placeholders. */
 export const MIN_RELEASE_BODY_CHARS = 20
 /** Cap commits sent to Claude so large diffs don't blow the prompt. */
@@ -84,27 +88,30 @@ const TWITTER_PROMPT = `You write tweets (X posts) announcing new releases of th
 CRITICAL FRAMING — read this twice:
 This tweet ONLY fires AFTER the FINAL X.Y.Z binary packages have shipped on repos.ripple.com (the public stable channel). The reader CAN install RIGHT NOW. This is the "operators, update your nodes" announcement — like a routine deploy notice — not a stay-tuned teaser. Tag is always FINAL (X.Y.Z, no -bN/-rcN suffix).
 
-Your job: tell operators (a) the version is live, (b) why it matters in one tight phrase, (c) implicitly: act now.
+Your job: tell operators (a) the version is live, (b) exactly what protocol surface it ships — a compact release report — (c) implicitly: act now.
 
 STRUCTURE (required) — write the tweet as TWO blocks with TWO BLANK LINES between them (i.e. three newline characters, "\\n\\n\\n"):
 - Block 1 (one line): the announcement + call to action, ending right after the action (e.g. "update your nodes.").
-- Block 2 (one line): the 1-2 concrete highlights, then the hashtag.
+- Block 2: the release report in this EXACT priority order, then the hashtag:
+  1. AMENDMENTS. If the input contains an "Amendments in this release" list, name EVERY amendment on it, verbatim, as "Amendments: A, B, C". NEVER omit, group, count, or summarize any of them — "and more", "12 amendments", "including" are all banned. If no such list is supplied, name every amendment the release notes mention.
+  2. SECURITY. If the release contains security fixes, say the area is hardened ("hardens Clawback invariants") — NEVER describe the fault, the vulnerability, or how it could be triggered.
+  3. PERFORMANCE. One tight phrase, only if the release notes call one out.
 
 The exact shape, both blank lines included:
 
-XRP Ledger version 3.1.3 is now available - update your nodes.
+XRP Ledger version 3.3.0 is now available - update your nodes.
 
 
-fixCleanup3_1_3 amendment fixes NFTs, Vaults, and Lending Protocol. #XRPLedger
+Amendments: Sponsor, BatchV1_1, ConfidentialTransfer, fixCleanup3_3_0, PermissionDelegationV1_1, DynamicMPT. Hardens MPT invariants. Faster JSON parsing. #XRPLedger
 
 Produce ONE tweet. Hard rules:
-- MAX 195 characters including the hashtag. Count carefully — a "Release notes: https://github.com/XRPLF/rippled/releases/tag/X.Y.Z" line will be appended programmatically, so leave room.
+- Aim for under 200 characters including the hashtag — but the COMPLETE amendment list always beats the length target: never drop an amendment to save characters. A "Release notes: https://github.com/XRPLF/rippled/releases/tag/X.Y.Z" line will be appended programmatically, so leave room.
 - End with: #XRPLedger
 - Refer to the release as "XRP Ledger version X.Y.Z" (e.g. "XRP Ledger version 3.1.3"). Never write the word "xrpld" or "XRPL" in the tweet.
 - Use plain hyphens "-" only. Never use em dashes (—) or en dashes (–) anywhere in the tweet.
 - Use action language. Operators should know what to do.
 - NO emojis or other pictographs anywhere in the tweet — plain text only.
-- Highlight 1-2 concrete things from the changes (e.g. "fixCleanup3_1_3 amendment", "MPT cover checks"). If the release contains an AMENDMENT that's in an activation period, prioritise that — it's the strongest "act now" signal.
+- Amendment names are copied EXACTLY as given — never rename, expand, or prettify them.
 - Short, energetic sentences. Active voice. No corporate filler.
 - Plain text only — no markdown, no bullet lists, no quotes around the tweet, no preamble.
 
@@ -164,6 +171,12 @@ export interface SummarizeOptions {
    * there, so the narrative must not add a redundant message-only one.
    */
   labelBreaking?: boolean
+  /**
+   * Authoritative names of the votable amendments added this release (from the
+   * deterministic surface scan). When set with includeTwitter, the tweet must
+   * name every one of them verbatim — the AI never derives the list itself.
+   */
+  amendments?: string[]
 }
 
 /**
@@ -188,7 +201,8 @@ export async function summarizeReleaseByTag(
       opts.apiKey,
       opts.logger,
       opts.includeTwitter,
-      opts.labelBreaking
+      opts.labelBreaking,
+      opts.amendments
     )
   }
 
@@ -207,10 +221,11 @@ export async function summarizeBody(
   apiKey: string,
   logger?: Logger,
   includeTwitter = false,
-  labelBreaking = true
+  labelBreaking = true,
+  amendments?: string[]
 ): Promise<Summaries> {
   const userMessage = `Summarize xrpld ${tag} release notes:\n\n${body}`
-  const twitterInput = `Version: XRP Ledger version ${tag}\nRelease notes:\n${body}`
+  const twitterInput = `Version: XRP Ledger version ${tag}\n${amendmentsBlock(amendments)}Release notes:\n${body}`
   return runBothPrompts({
     tag,
     apiKey,
@@ -260,8 +275,15 @@ async function summarizeCommitsSinceLast(
     opts.apiKey,
     opts.logger,
     opts.includeTwitter,
-    opts.labelBreaking
+    opts.labelBreaking,
+    opts.amendments
   )
+}
+
+/** The authoritative amendment list for the tweet input ('' when absent). */
+function amendmentsBlock(amendments?: string[]): string {
+  if (!amendments || amendments.length === 0) return ''
+  return `Amendments in this release (name EVERY one in the tweet, verbatim): ${amendments.join(', ')}\n`
 }
 
 export const TRIVIAL_COMMIT =
@@ -274,7 +296,8 @@ async function summarizeCommitsList(
   apiKey: string,
   logger?: Logger,
   includeTwitter = false,
-  labelBreaking = true
+  labelBreaking = true,
+  amendments?: string[]
 ): Promise<Summaries> {
   const filtered = commits
     .map((c) => ({ ...c, message: c.message.split('\n')[0].trim() }))
@@ -300,7 +323,7 @@ async function summarizeCommitsList(
       : MATTERMOST_COMMITS_PROMPT_FLAT,
     mattermostUser: `Summarize commits between xrpld ${baseTag} and ${tag}:\n\n${commitList}`,
     mattermostHeader: `**Preliminary changes since \`${baseTag}\`** _(no GitHub Release published yet — summarized from raw commits)_:`,
-    twitterUser: `Version: XRP Ledger version ${tag} (no GitHub Release published; tagged from develop/release branch)\nCommits since ${baseTag}:\n${commitList}`,
+    twitterUser: `Version: XRP Ledger version ${tag} (no GitHub Release published; tagged from develop/release branch)\n${amendmentsBlock(amendments)}Commits since ${baseTag}:\n${commitList}`,
     includeTwitter,
     source: `commits-since-${baseTag}`,
   })
