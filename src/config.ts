@@ -38,7 +38,10 @@ interface AppSecrets {
 }
 
 function alphanetSyncDebounceMinutes(): number {
-  const parsed = parseInt(process.env.ALPHANET_SYNC_DEBOUNCE_MINUTES ?? '30', 10)
+  const parsed = parseInt(
+    process.env.ALPHANET_SYNC_DEBOUNCE_MINUTES ?? '30',
+    10
+  )
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 30
 }
 

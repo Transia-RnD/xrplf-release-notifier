@@ -52,7 +52,9 @@ export async function maybeDispatchAlphanetSync(
     })
     clearTimeout(timer)
     if (!response.ok) {
-      logger.error('Alphanet sync dispatch rejected', { status: response.status })
+      logger.error('Alphanet sync dispatch rejected', {
+        status: response.status,
+      })
       return 'failed'
     }
     lastDispatchMs = now

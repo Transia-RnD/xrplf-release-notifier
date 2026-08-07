@@ -33,15 +33,23 @@ describe('maybeDispatchAlphanetSync', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     resetAlphanetSyncDebounce()
-    global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 202 }) as never
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue({ ok: true, status: 202 }) as never
   })
 
   it('is disabled when url or secret are unset', async () => {
     expect(
-      await maybeDispatchAlphanetSync(config({ alphanetSyncUrl: undefined }), logger)
+      await maybeDispatchAlphanetSync(
+        config({ alphanetSyncUrl: undefined }),
+        logger
+      )
     ).toBe('disabled')
     expect(
-      await maybeDispatchAlphanetSync(config({ alphanetSyncSecret: undefined }), logger)
+      await maybeDispatchAlphanetSync(
+        config({ alphanetSyncSecret: undefined }),
+        logger
+      )
     ).toBe('disabled')
     expect(global.fetch).not.toHaveBeenCalled()
   })
@@ -66,7 +74,10 @@ describe('maybeDispatchAlphanetSync', () => {
   })
 
   it('does not arm the debounce on failure', async () => {
-    ;(global.fetch as jest.Mock).mockResolvedValueOnce({ ok: false, status: 401 })
+    ;(global.fetch as jest.Mock).mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+    })
     expect(await maybeDispatchAlphanetSync(config(), logger)).toBe('failed')
     expect(await maybeDispatchAlphanetSync(config(), logger)).toBe('dispatched')
   })
