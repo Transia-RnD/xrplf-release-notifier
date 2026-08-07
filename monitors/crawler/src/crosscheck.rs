@@ -230,7 +230,11 @@ mod tests {
         // Two of the validators whose validations s1/s2 lost that day.
         assert!(masters.contains("nHUdjQgg33FRu88GQDtzLWRw95xKnBurUZcqPpe3qC9XVeBNrHeJ")); // swarthout
         assert!(masters.contains("nHUryiyDqEtyWVtFG24AAhaYjMf9FRLietbGzviF3piJsMm9qyDR")); // bitrue
-        assert!(masters.len() >= 28, "expected quorum-scale coverage, got {}", masters.len());
+        assert!(
+            masters.len() >= 28,
+            "expected quorum-scale coverage, got {}",
+            masters.len()
+        );
     }
 
     #[test]

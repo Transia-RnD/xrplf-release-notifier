@@ -196,12 +196,20 @@ async fn crosscheck_low_quorum(alert: &mut Alert, base_url: &str) {
     tokio::time::sleep(Duration::from_secs(3)).await;
     match crosscheck::fetch_master_keys(base_url, seq).await {
         Err(e) => {
-            eprintln!("[{}] crosscheck unavailable for ledger {}: {}", ts(), seq, e);
+            eprintln!(
+                "[{}] crosscheck unavailable for ledger {}: {}",
+                ts(),
+                seq,
+                e
+            );
             // Unconfirmable ≠ confirmed: only a vantage-confirmed quorum loss
             // pages CRITICAL. A single-vantage verdict stays a WARNING.
             if alert.severity == "CRITICAL" {
                 alert.severity = "WARNING";
-                alert.message = format!("{} — unconfirmed (crosscheck vantage unreachable)", alert.message);
+                alert.message = format!(
+                    "{} — unconfirmed (crosscheck vantage unreachable)",
+                    alert.message
+                );
             }
             if let Some(obj) = alert.details.as_object_mut() {
                 obj.insert(
@@ -211,8 +219,7 @@ async fn crosscheck_low_quorum(alert: &mut Alert, base_url: &str) {
             }
         }
         Ok(vantage) => {
-            let recovered: Vec<&String> =
-                missing.iter().filter(|k| vantage.contains(*k)).collect();
+            let recovered: Vec<&String> = missing.iter().filter(|k| vantage.contains(*k)).collect();
             match crosscheck::verdict(unl_count, min_required, recovered.len()) {
                 Verdict::VantageGap {
                     recovered: r,
@@ -375,7 +382,11 @@ pub async fn run(
     if crosscheck_url.is_empty() {
         eprintln!("[{}] LOW_QUORUM crosscheck disabled", ts());
     } else {
-        eprintln!("[{}] LOW_QUORUM crosscheck vantage: {}", ts(), crosscheck_url);
+        eprintln!(
+            "[{}] LOW_QUORUM crosscheck vantage: {}",
+            ts(),
+            crosscheck_url
+        );
     }
     let rpc_check_urls: Vec<String> = rpc_check_url
         .split(',')
@@ -486,9 +497,7 @@ pub async fn run(
                 let mut rates: Vec<String> = counts
                     .iter()
                     .map(|(src, n)| {
-                        let short = src
-                            .trim_start_matches("wss://")
-                            .trim_start_matches("ws://");
+                        let short = src.trim_start_matches("wss://").trim_start_matches("ws://");
                         format!("{short}={n}/min")
                     })
                     .collect();

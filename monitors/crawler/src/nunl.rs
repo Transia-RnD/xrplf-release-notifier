@@ -49,6 +49,10 @@ fn linked_name(names: &HashMap<String, String>, hex_key: &str) -> String {
     }
 }
 
+/// An unchanged Negative UNL re-posts this often, so a quiet network still
+/// produces a periodic "nobody is listed" card instead of ambiguous silence.
+pub const SUMMARY_HEARTBEAT_SECS: i64 = 24 * 60 * 60;
+
 /// Well-known ledger index of the NegativeUNL singleton (sha512half(uint16('N'))).
 pub const NEGATIVE_UNL_INDEX: &str =
     "2E8A59AA9D3B5B186B0B9E0F62E6C02587CA74A4D778938E957B6357D364B244";
@@ -56,12 +60,6 @@ pub const NEGATIVE_UNL_INDEX: &str =
 #[derive(Default, Serialize, Deserialize, Clone)]
 pub struct NunlState {
     pub disabled: Vec<String>,
-}
-
-impl NunlState {
-    fn is_seeded(&self) -> bool {
-        !self.disabled.is_empty()
-    }
 }
 
 pub struct NunlAlert {
@@ -130,13 +128,102 @@ fn cap_alert(nunl_size: usize, unl_size: usize) -> Option<NunlAlert> {
     }
 }
 
-/// Diff `fresh` against `prev`. `cold` suppresses membership announcements on the
-/// first poll (but a genuinely empty NUNL producing no alerts is also fine).
-/// `unl_size` drives the size-vs-cap check, which runs even on a cold start.
+/// One card describing the whole Negative UNL, not one per validator. The dedup
+/// key is a fingerprint of the membership, so a change posts immediately while an
+/// unchanged set re-posts only on the heartbeat interval — which is what turns
+/// "no alerts" from an ambiguous silence into a stated "nobody is listed".
+fn summary_alert(
+    prev: &NunlState,
+    fresh: &NunlState,
+    names: &HashMap<String, String>,
+    unl_size: usize,
+) -> NunlAlert {
+    let mut listed = fresh.disabled.clone();
+    listed.sort();
+    let digest = Sha256::digest(listed.join(",").as_bytes());
+    let key: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+
+    let added: Vec<String> = fresh
+        .disabled
+        .iter()
+        .filter(|v| !prev.disabled.contains(v))
+        .map(|v| linked_name(names, v))
+        .collect();
+    let removed: Vec<String> = prev
+        .disabled
+        .iter()
+        .filter(|v| !fresh.disabled.contains(v))
+        .map(|v| linked_name(names, v))
+        .collect();
+
+    let mut fields = vec![("listed".into(), fresh.disabled.len().to_string())];
+    if unl_size > 0 {
+        fields.push(("unl_size".into(), unl_size.to_string()));
+    }
+    if !added.is_empty() {
+        fields.push(("added".into(), added.join(", ")));
+    }
+    if !removed.is_empty() {
+        fields.push(("removed".into(), removed.join(", ")));
+    }
+
+    if fresh.disabled.is_empty() {
+        let of_unl = if unl_size > 0 {
+            format!(" All {unl_size} UNL validators are participating in quorum.")
+        } else {
+            String::new()
+        };
+        let recovered = if removed.is_empty() {
+            String::new()
+        } else {
+            format!(" Re-enabled since the last poll: {}.", removed.join(", "))
+        };
+        return NunlAlert {
+            severity: Severity::Info,
+            category: "NUNL_SUMMARY",
+            key,
+            title: "Negative UNL is empty".into(),
+            text: format!("No validators are disabled.{of_unl}{recovered}"),
+            fields,
+        };
+    }
+
+    let roster: Vec<String> = listed.iter().map(|v| linked_name(names, v)).collect();
+    let of_unl = if unl_size > 0 {
+        format!(" of {unl_size}")
+    } else {
+        String::new()
+    };
+    let mut text = format!(
+        "{}{of_unl} validator(s) disabled and removed from quorum: {}.",
+        fresh.disabled.len(),
+        roster.join(", ")
+    );
+    if !added.is_empty() {
+        text.push_str(&format!(
+            " Added since the last poll: {}.",
+            added.join(", ")
+        ));
+    }
+    if !removed.is_empty() {
+        text.push_str(&format!(" Re-enabled: {}.", removed.join(", ")));
+    }
+    NunlAlert {
+        severity: Severity::Warning,
+        category: "NUNL_SUMMARY",
+        key,
+        title: format!("Negative UNL: {} disabled", fresh.disabled.len()),
+        text,
+        fields,
+    }
+}
+
+/// Build the alerts for a poll: the size-vs-cap check plus the membership summary.
+/// `unl_size` drives the cap check. There is no cold-start suppression — a summary
+/// is a statement of current state, so reporting it on the first poll is correct.
 pub fn diff(
     prev: &NunlState,
     fresh: &NunlState,
-    cold: bool,
     names: &HashMap<String, String>,
     unl_size: usize,
 ) -> Vec<NunlAlert> {
@@ -148,40 +235,7 @@ pub fn diff(
         alerts.push(a);
     }
 
-    if cold && !prev.is_seeded() {
-        return alerts;
-    }
-
-    for v in &fresh.disabled {
-        if !prev.disabled.contains(v) {
-            let n = name_of(names, v);
-            let link = linked_name(names, v);
-            alerts.push(NunlAlert {
-                severity: Severity::Warning,
-                category: "NUNL_DISABLED",
-                key: v.clone(),
-                title: format!("Validator {n} added to Negative UNL"),
-                text: format!(
-                    "{link} (`{v}`) was disabled (unreliable/offline) and removed from quorum."
-                ),
-                fields: vec![("validator".into(), link)],
-            });
-        }
-    }
-    for v in &prev.disabled {
-        if !fresh.disabled.contains(v) {
-            let n = name_of(names, v);
-            let link = linked_name(names, v);
-            alerts.push(NunlAlert {
-                severity: Severity::Info,
-                category: "NUNL_REENABLED",
-                key: v.clone(),
-                title: format!("Validator {n} re-enabled"),
-                text: format!("{link} (`{v}`) recovered and was removed from the Negative UNL."),
-                fields: vec![("validator".into(), link)],
-            });
-        }
-    }
+    alerts.push(summary_alert(prev, fresh, names, unl_size));
     alerts
 }
 
@@ -248,7 +302,6 @@ pub async fn run(
     names_url: Option<String>,
 ) -> anyhow::Result<()> {
     let fresh = fetch(endpoint).await?;
-    let cold = !std::path::Path::new(state_file).exists();
     let prev: NunlState = cstate::load_state(state_file).unwrap_or_default();
     let names = crate::names::resolve(names_url.as_deref(), names_file.as_deref()).await;
 
@@ -256,7 +309,7 @@ pub async fn run(
     // quorum math draws on, so its size is |UNL| for the negative-UNL cap. If the
     // fetch failed (empty), the cap check is skipped rather than firing falsely.
     let unl_size = names.len();
-    let alerts = diff(&prev, &fresh, cold, &names, unl_size);
+    let alerts = diff(&prev, &fresh, &names, unl_size);
     if let Err(e) = cstate::save_state(state_file, &fresh) {
         eprintln!("nunl: state save failed: {e}");
     }
@@ -265,15 +318,30 @@ pub async fn run(
     if sink.enabled() {
         let now = chrono::Utc::now().timestamp();
         for a in &alerts {
-            sink.send(
-                a.severity,
-                a.category,
-                &a.key,
-                &a.title,
-                &a.text,
-                a.fields.clone(),
-                now,
-            );
+            // The summary's key changes whenever membership does, so a change
+            // posts at once; an unchanged roster re-posts on the heartbeat.
+            if a.category == "NUNL_SUMMARY" {
+                sink.send_every(
+                    SUMMARY_HEARTBEAT_SECS,
+                    a.severity,
+                    a.category,
+                    &a.key,
+                    &a.title,
+                    &a.text,
+                    a.fields.clone(),
+                    now,
+                );
+            } else {
+                sink.send(
+                    a.severity,
+                    a.category,
+                    &a.key,
+                    &a.title,
+                    &a.text,
+                    a.fields.clone(),
+                    now,
+                );
+            }
         }
     }
     eprintln!(
@@ -294,31 +362,56 @@ mod tests {
         }
     }
 
+    fn summary(alerts: &[NunlAlert]) -> &NunlAlert {
+        alerts
+            .iter()
+            .find(|a| a.category == "NUNL_SUMMARY")
+            .expect("every poll produces a summary")
+    }
+
+    // A summary states current membership, so unlike the old per-validator
+    // events it is correct to post it on the very first poll.
     #[test]
-    fn cold_start_silent() {
-        // unl_size 0 => cap check off; cold + unseeded prev => no membership churn.
-        assert!(diff(
-            &NunlState::default(),
-            &st(&["EDAAA"]),
-            true,
-            &HashMap::new(),
-            0
-        )
-        .is_empty());
+    fn cold_start_reports_state() {
+        let a = diff(&NunlState::default(), &st(&["EDAAA"]), &HashMap::new(), 0);
+        let s = summary(&a);
+        assert_eq!(s.severity, Severity::Warning);
+        assert!(s.text.contains("EDAAA"));
     }
 
     #[test]
-    fn disable_and_reenable() {
-        let prev = st(&["EDAAA"]);
-        let fresh = st(&["EDBBB"]);
-        // unl_size 0 => no cap alert; isolate the membership diff.
-        let a = diff(&prev, &fresh, false, &HashMap::new(), 0);
-        assert!(a
-            .iter()
-            .any(|x| x.category == "NUNL_DISABLED" && x.key == "EDBBB"));
-        assert!(a
-            .iter()
-            .any(|x| x.category == "NUNL_REENABLED" && x.key == "EDAAA"));
+    fn empty_nunl_says_so() {
+        let a = diff(&st(&["EDAAA"]), &NunlState::default(), &HashMap::new(), 35);
+        let s = summary(&a);
+        assert_eq!(s.severity, Severity::Info);
+        assert_eq!(s.title, "Negative UNL is empty");
+        assert!(s.text.contains("All 35 UNL validators"));
+        // The validator that recovered is still named, so the churn is not lost.
+        assert!(s.text.contains("EDAAA"));
+    }
+
+    // One card for the whole set, naming both sides of the churn.
+    #[test]
+    fn churn_folds_into_one_summary() {
+        let a = diff(&st(&["EDAAA"]), &st(&["EDBBB"]), &HashMap::new(), 0);
+        assert_eq!(a.iter().filter(|x| x.category == "NUNL_SUMMARY").count(), 1);
+        let s = summary(&a);
+        assert!(s.text.contains("Added since the last poll"));
+        assert!(s.text.contains("EDBBB"));
+        assert!(s.text.contains("Re-enabled"));
+        assert!(s.text.contains("EDAAA"));
+    }
+
+    // Dedup key tracks membership, not order: an unchanged set keeps its key
+    // (so it re-posts only on the heartbeat), a changed set gets a new one.
+    #[test]
+    fn key_follows_membership() {
+        let none = HashMap::new();
+        let k =
+            |prev: &NunlState, fresh: &NunlState| summary(&diff(prev, fresh, &none, 0)).key.clone();
+        let base = k(&NunlState::default(), &st(&["a", "b"]));
+        assert_eq!(base, k(&st(&["a", "b"]), &st(&["b", "a"])));
+        assert_ne!(base, k(&st(&["a", "b"]), &st(&["a", "c"])));
     }
 
     // S16: size-vs-cap bands. 20% of UNL warns (approaching), 25% is critical (at
@@ -327,23 +420,17 @@ mod tests {
     fn cap_bands() {
         let none = HashMap::new();
         // 2 / 10 = 20% => WARNING
-        let w = diff(&NunlState::default(), &st(&["a", "b"]), false, &none, 10);
+        let w = diff(&NunlState::default(), &st(&["a", "b"]), &none, 10);
         assert!(w
             .iter()
             .any(|x| x.category == "NUNL_CAP" && x.severity == Severity::Warning));
         // 3 / 12 = 25% => CRITICAL
-        let c = diff(
-            &NunlState::default(),
-            &st(&["a", "b", "c"]),
-            false,
-            &none,
-            12,
-        );
+        let c = diff(&NunlState::default(), &st(&["a", "b", "c"]), &none, 12);
         assert!(c
             .iter()
             .any(|x| x.category == "NUNL_CAP" && x.severity == Severity::Critical));
         // 1 / 20 = 5% => no cap alert
-        let n = diff(&NunlState::default(), &st(&["a"]), false, &none, 20);
+        let n = diff(&NunlState::default(), &st(&["a"]), &none, 20);
         assert!(!n.iter().any(|x| x.category == "NUNL_CAP"));
     }
 }

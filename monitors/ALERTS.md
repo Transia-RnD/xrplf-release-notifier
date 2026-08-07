@@ -89,8 +89,15 @@ Polls the on-ledger NegativeUNL object and diffs the disabled set.
 
 | Alert | Severity | Fires when | Dedup |
 |-------|----------|-----------|-------|
-| `NUNL_DISABLED` | WARNING | A validator is added to the Negative UNL (unreliable/offline) | per validator, 24h |
-| `NUNL_REENABLED` | INFO | A validator recovers and leaves the Negative UNL | per validator, 24h |
+| `NUNL_SUMMARY` | INFO (empty) / WARNING (any listed) | Every poll: one card stating the whole current Negative UNL, naming validators added or re-enabled since the last poll | key is a fingerprint of the membership — a change posts immediately, an unchanged set re-posts every 24h |
+| `NUNL_CAP` | WARNING ≥20% / CRITICAL ≥25% | The listing approaches or reaches the protocol cap on Negative UNL size | per band |
+
+`NUNL_SUMMARY` replaces the former per-validator `NUNL_DISABLED` / `NUNL_REENABLED`
+events. Those were edge-triggered, so a healthy network produced no output at all
+and silence was indistinguishable from a dead pipeline. The summary is a statement
+of current state instead: it posts on the first poll, re-posts the moment
+membership changes, and otherwise repeats once a day — so "nobody is on the
+Negative UNL" is something you are told rather than something you infer.
 
 ## crawler `unl-adoption` — XRPL mainnet UNL hotfix adoption (hourly, observatory VM)
 

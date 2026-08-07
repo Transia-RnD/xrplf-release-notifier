@@ -438,12 +438,15 @@ mod tests {
 
         // mostly patched → WARNING band, then INFO when nearly complete
         r.versions = HashMap::from([("xrpld-3.2.1".into(), 850), ("xrpld-3.2.0".into(), 150)]);
-        assert_eq!(evaluate_adoption(&r, (3, 2, 1)).0.severity, Severity::Warning);
+        assert_eq!(
+            evaluate_adoption(&r, (3, 2, 1)).0.severity,
+            Severity::Warning
+        );
         r.versions = HashMap::from([("xrpld-3.2.1".into(), 950), ("xrpld-3.2.0".into(), 50)]);
         let (done, fully_patched) = evaluate_adoption(&r, (3, 2, 1));
         assert_eq!(done.severity, Severity::Info);
         assert!(!fully_patched); // 50 still vulnerable
-        // movement changes the dedup key → posts immediately
+                                 // movement changes the dedup key → posts immediately
         assert_ne!(done.key, "3.2.1@20");
         assert_eq!(done.key, "3.2.1@95");
 

@@ -111,11 +111,7 @@ impl SourceTracker {
 
 /// Pure comparison: union all sources' UNL sets, then flag each source whose
 /// own set is missing >= min_gap validators that at least one other delivered.
-fn evaluate(
-    seq: u64,
-    per_source: &HashMap<String, HashSet<String>>,
-    min_gap: usize,
-) -> Vec<Alert> {
+fn evaluate(seq: u64, per_source: &HashMap<String, HashSet<String>>, min_gap: usize) -> Vec<Alert> {
     let union: HashSet<&String> = per_source.values().flatten().collect();
     let mut alerts = Vec::new();
     let mut sources: Vec<&String> = per_source.keys().collect();
@@ -208,7 +204,7 @@ mod tests {
             t.record("s1", Some(&format!("v{i}")), 5);
         }
         t.record("s1", Some("not-unl"), 5); // ignored: not a UNL key
-        // Window not yet elapsed — no alerts.
+                                            // Window not yet elapsed — no alerts.
         assert!(t.tick().is_empty());
         // Force the window to look old.
         t.ledgers.get_mut(&5).unwrap().first_seen =
