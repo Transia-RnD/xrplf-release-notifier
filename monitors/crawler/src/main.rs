@@ -62,9 +62,10 @@ enum Command {
         report_json: Option<String>,
 
         /// Post a PATCH_ADOPTION status card: share of core nodes at/above this
-        /// version, e.g. a hotfix like 3.2.1 (needs --report-json; posts on
-        /// movement, else every 12h)
-        #[arg(long)]
+        /// version (needs --report-json; posts on movement, else every 12h).
+        /// Defaults to the manifest-flood hotfix baseline; bump on the next
+        /// security release.
+        #[arg(long, default_value = "3.2.1")]
         min_safe_version: Option<String>,
 
         /// Mattermost webhook URL for alerts
