@@ -1,9 +1,79 @@
 import { SecretManagerServiceClient } from '@google-cloud/secret-manager'
+import type { Channel } from './notifications/twilio'
 
 function requireEnv(name: string): string {
   const value = process.env[name]
   if (!value) throw new Error(`Required env var missing: ${name}`)
   return value
+}
+
+/**
+ * Everything needed to page a phone. Absent unless the whole set resolves —
+ * a half-configured pager is worse than none, because it looks enabled and
+ * silently drops alerts.
+ *
+ * The roster ciphertext lives in GCS and these keys in Secret Manager, so
+ * reading a number requires both IAM surfaces. Keep them apart.
+ */
+export interface PagerConfig {
+  accountSid: string
+  keySid: string
+  keySecret: string
+  from: string
+  channel: Channel
+  /** Approved WhatsApp template; business-initiated pages are rejected without one. */
+  alertTemplateSid: string
+  /** Raw `SMS_ENC_KEYS` / `SMS_INDEX_PEPPER`; parsed by the crypto layer. */
+  encKeys: string
+  indexPepper: string
+}
+
+const PAGER_KEYS = [
+  'TWILIO_ACCOUNT_SID',
+  'TWILIO_API_KEY_SID',
+  'TWILIO_API_KEY_SECRET',
+  'TWILIO_FROM',
+  'TWILIO_ALERT_TEMPLATE_SID',
+  'SMS_ENC_KEYS',
+  'SMS_INDEX_PEPPER',
+] as const
+
+/**
+ * `lookup` reads either process.env or the secret payload, so both load paths
+ * agree on what a complete pager configuration is.
+ */
+function pagerConfig(
+  lookup: (key: string) => string | undefined
+): PagerConfig | undefined {
+  if (process.env.PAGER_ENABLED !== 'true') return undefined
+
+  const found = new Map<string, string>()
+  const missing: string[] = []
+  for (const key of PAGER_KEYS) {
+    const value = lookup(key)
+    if (value) found.set(key, value)
+    else missing.push(key)
+  }
+
+  if (missing.length > 0) {
+    throw new Error(
+      `PAGER_ENABLED=true but missing: ${missing.join(', ')}. ` +
+        'Unset PAGER_ENABLED to run without a pager.'
+    )
+  }
+
+  const value = (key: string): string => found.get(key) ?? ''
+
+  return {
+    accountSid: value('TWILIO_ACCOUNT_SID'),
+    keySid: value('TWILIO_API_KEY_SID'),
+    keySecret: value('TWILIO_API_KEY_SECRET'),
+    from: value('TWILIO_FROM'),
+    channel: lookup('TWILIO_CHANNEL') === 'sms' ? 'sms' : 'whatsapp',
+    alertTemplateSid: value('TWILIO_ALERT_TEMPLATE_SID'),
+    encKeys: value('SMS_ENC_KEYS'),
+    indexPepper: value('SMS_INDEX_PEPPER'),
+  }
 }
 
 export interface AppConfig {
@@ -26,9 +96,13 @@ export interface AppConfig {
   alphanetSyncUrl?: string
   alphanetSyncSecret?: string
   alphanetSyncDebounceMinutes: number
+  /** Undefined unless PAGER_ENABLED=true and every credential resolves. */
+  pager?: PagerConfig
 }
 
 interface AppSecrets {
+  /** Parsed from a JSON blob, so unknown keys are expected rather than an error. */
+  [key: string]: string | undefined
   GITHUB_WEBHOOK_SECRET: string
   GITHUB_TOKEN?: string
   MATTERMOST_WEBHOOK_URL: string
@@ -40,6 +114,14 @@ interface AppSecrets {
   ANTHROPIC_API_KEY: string
   POLLER_TOKEN?: string
   ALPHANET_SYNC_SECRET?: string
+  TWILIO_ACCOUNT_SID?: string
+  TWILIO_API_KEY_SID?: string
+  TWILIO_API_KEY_SECRET?: string
+  TWILIO_FROM?: string
+  TWILIO_CHANNEL?: string
+  TWILIO_ALERT_TEMPLATE_SID?: string
+  SMS_ENC_KEYS?: string
+  SMS_INDEX_PEPPER?: string
 }
 
 function alphanetSyncDebounceMinutes(): number {
@@ -75,6 +157,7 @@ export async function loadConfig(): Promise<AppConfig> {
     alphanetSyncUrl: process.env.ALPHANET_SYNC_URL,
     alphanetSyncSecret: process.env.ALPHANET_SYNC_SECRET,
     alphanetSyncDebounceMinutes: alphanetSyncDebounceMinutes(),
+    pager: pagerConfig((k) => process.env[k]),
   }
 }
 
@@ -113,5 +196,6 @@ async function loadFromSecretManager(
     alphanetSyncUrl: process.env.ALPHANET_SYNC_URL,
     alphanetSyncSecret: secrets.ALPHANET_SYNC_SECRET,
     alphanetSyncDebounceMinutes: alphanetSyncDebounceMinutes(),
+    pager: pagerConfig((k) => secrets[k] ?? process.env[k]),
   }
 }

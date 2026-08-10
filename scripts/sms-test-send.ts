@@ -28,7 +28,9 @@ import {
   explainErrorCode,
   fetchMessage,
   isTerminal,
-  sendSms,
+  send,
+  type Template,
+  type Channel,
   type TwilioConfig,
 } from '../src/notifications/twilio'
 
@@ -45,6 +47,21 @@ const TEST_BODY =
 const LOCAL_FILE =
   process.env.SMS_ROSTER_FILE ?? path.resolve(process.cwd(), '.sms-roster.json')
 
+const CHANNEL: Channel =
+  process.env.TWILIO_CHANNEL === 'whatsapp' ? 'whatsapp' : 'sms'
+
+/**
+ * WhatsApp needs an approved template for a business-initiated message; the
+ * `{{1}}` slot carries the send time so each test is distinguishable on the
+ * handset.
+ */
+const TEMPLATE: Template | undefined = process.env.TWILIO_TEST_TEMPLATE_SID
+  ? {
+      contentSid: process.env.TWILIO_TEST_TEMPLATE_SID,
+      variables: { '1': new Date().toISOString().slice(0, 16) + 'Z' },
+    }
+  : undefined
+
 const POLL_ATTEMPTS = 10
 const POLL_INTERVAL_MS = 3000
 
@@ -56,26 +73,43 @@ function loadKeys(): CryptoKeys {
   return { ring: parseKeyRing(enc), indexPepper: Buffer.from(pepper, 'base64') }
 }
 
+/**
+ * Resolve basic-auth credentials as a pair. An API key only authenticates
+ * alongside its own secret, so a half-set `SK…` falls through to the account
+ * token rather than pairing with an unrelated secret.
+ */
 function loadTwilio(): TwilioConfig {
-  const candidate = {
-    accountSid: process.env.TWILIO_ACCOUNT_SID ?? process.env.TWILIO_CLIENT_ID,
-    keySid: process.env.TWILIO_API_KEY_SID,
-    keySecret: process.env.TWILIO_API_KEY_SECRET ?? process.env.TWILIO_API_KEY,
-    from: process.env.TWILIO_FROM,
-  }
+  const accountSid =
+    process.env.TWILIO_ACCOUNT_SID ?? process.env.TWILIO_CLIENT_ID
+  const keySid = process.env.TWILIO_API_KEY_SID
+  const keySecret = process.env.TWILIO_API_KEY_SECRET
+  const authToken = process.env.TWILIO_AUTH_TOKEN
+
+  const pair =
+    keySid && keySecret
+      ? { keySid, keySecret }
+      : authToken
+        ? { keySid: accountSid, keySecret: authToken }
+        : {}
+
   const parsed = z
     .object({
-      accountSid: z.string().min(1),
+      accountSid: z.string().regex(/^AC[0-9a-f]{32}$/, 'must be an AC… SID'),
       keySid: z.string().min(1),
       keySecret: z.string().min(1),
       from: z.string().min(1),
     })
-    .safeParse(candidate)
+    .safeParse({ accountSid, ...pair, from: process.env.TWILIO_FROM })
   if (!parsed.success) {
-    const missing = parsed.error.issues.map((i) => i.path.join('.')).join(', ')
-    throw new Error(`missing Twilio config: ${missing}`)
+    const detail = parsed.error.issues
+      .map((i) => `${i.path.join('.')} (${i.message})`)
+      .join(', ')
+    throw new Error(
+      `bad Twilio config: ${detail}\n` +
+        'set TWILIO_API_KEY_SID + TWILIO_API_KEY_SECRET, or TWILIO_AUTH_TOKEN'
+    )
   }
-  return parsed.data
+  return { ...parsed.data, channel: CHANNEL }
 }
 
 function loadRoster(): Roster {
@@ -98,6 +132,8 @@ async function main(): Promise<void> {
     (s) => s.status === 'active'
   )
 
+  console.log(`channel: ${CHANNEL}`)
+  console.log(`template: ${TEMPLATE?.contentSid ?? '(free-form body)'}`)
   console.log(`from: ${twilio.from}`)
   console.log(`body: ${TEST_BODY} (${TEST_BODY.length} chars)`)
   console.log(`recipients: ${active.length} active\n`)
@@ -120,7 +156,7 @@ async function main(): Promise<void> {
     // Decrypt one recipient at a time, at send time, and never hold the
     // plaintext beyond this iteration.
     const to = open(sub.phone, keys)
-    const result = await sendSms(twilio, to, TEST_BODY)
+    const result = await send(twilio, to, TEST_BODY, TEMPLATE)
     if (result.ok && result.sid) {
       console.log(
         `  accepted  ${sub.label.padEnd(6)} ${mask(to)}  ${result.sid}  status=${result.status}`
