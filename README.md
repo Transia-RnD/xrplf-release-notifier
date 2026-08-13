@@ -132,6 +132,68 @@ gcloud scheduler jobs create http xrplf-release-notifier-poll \
 
 If the job already exists, update its headers with `gcloud scheduler jobs update http xrplf-release-notifier-poll --location=us-central1 --update-headers="X-Cloud-Scheduler-Token=$POLLER_TOKEN"`.
 
+## Recurring reports (the scheduler)
+
+Anything that runs on a calendar — weekly digests, daily countdowns — is declared in
+[`config/schedules.yaml`](config/schedules.yaml), not in `gcloud`. **One** Cloud Scheduler
+job POSTs `/tick` every 5 minutes and the dispatcher decides what is due, so adding a
+report costs a handler plus five lines of YAML — no new job, no new route, no new secret.
+
+```yaml
+jobs:
+  - name: unl-pr-queue
+    cron: '0 9 * * MON'
+    tz: Europe/Amsterdam
+    handler: unlPrQueue
+    enabled: true
+```
+
+Current jobs:
+
+| Job | When | What |
+|---|---|---|
+| `weekly-update` | Fri 16:00 CET | Drafts the weekly team update from the week's GitHub activity, tagged `[partner]`/`[board]`/`[internal]`. A **draft to edit**, not a final post — it only sees pushed work. Author defaults to `dangell7`, override with `WEEKLY_UPDATE_AUTHOR`. |
+| `validator-review` | Mon 09:00 CET | dUNL reliability review — 30d agreement, version spread, and any member that is partial-only, revoked, or invisible to the data source. Membership from `XRPLF/unl` (data.xrpl.org cannot see `unl.xrplf.org`); agreement from data.xrpl.org. Reliability only — engagement is tracked separately. |
+| `validator-toml` | 1st of month, 09:00 CET | XLS-50 / domain-verification sweep — who publishes an `xrp-ledger.toml` listing their own key, who declares `network_asn` (a MUST), ASN/country concentration, and declared hardware. The only automated source of the validator hardware inventory. |
+| `unl-pr-queue` | Mon 09:00 CET | Open PRs on `XRPLF/unl`, split into inclusion / removal / housekeeping, flagged past 60 days. |
+
+`handler` must name an entry in `src/scheduler/handlers.ts`. The table is parsed and fully
+validated at startup — a bad cron expression, an unknown timezone, or a typo'd handler
+crashes the deploy rather than becoming a job that silently never fires.
+
+A job is due when at least one cron occurrence has passed since its **last successful**
+run. Two consequences worth knowing:
+
+- Downtime spanning three weekly slots produces **one** catch-up run, not three.
+- A handler that throws does **not** advance `lastRun`, so it retries on the next 5-minute
+  tick instead of waiting a week. After 3 consecutive failures the notifier posts about
+  its own breakage.
+
+A job seen for the first time is recorded without running, so a fresh deploy doesn't fire
+every report at once.
+
+```bash
+# One-time: the only scheduler job you need
+gcloud scheduler jobs create http xrplf-release-notifier-tick \
+    --location=us-central1 \
+    --schedule="*/5 * * * *" \
+    --uri="https://<service-url>/tick" \
+    --http-method=POST \
+    --headers="X-Cloud-Scheduler-Token=$POLLER_TOKEN"
+
+# What would run right now, posting nothing
+curl -sX POST "$SERVICE_URL/tick" \
+    -H "X-Cloud-Scheduler-Token: $POLLER_TOKEN" \
+    -H 'content-type: application/json' -d '{"dryRun":true}' | jq
+
+# Did the weekly report fire, and when is the next one?
+curl -s "$SERVICE_URL/schedules" \
+    -H "X-Cloud-Scheduler-Token: $POLLER_TOKEN" | jq
+```
+
+State lives at `gs://xrplf-release-notifier/scheduler-state.json` as
+`{ jobs: { <name>: { lastRun, failures } } }`. Renaming a job resets its history.
+
 ### GitHub App Setup
 
 1. Create at `github.com/organizations/XRPLF/settings/apps/new`

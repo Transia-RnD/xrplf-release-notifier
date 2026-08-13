@@ -20,7 +20,11 @@ import { loadPollerState, savePollerState } from './poller/state'
 import { classifyVersion } from './version/parser'
 import type { VersionInfo } from './version/types'
 import { NotificationSource, VersionType } from './version/types'
-import { formatMattermost } from './notifications/mattermost'
+import {
+  formatMattermost,
+  envelope,
+  postToMattermost,
+} from './notifications/mattermost'
 import { summarizeReleaseByTag } from './ai/summarizer'
 import { composeBreakingSections } from './ai/breaking'
 import { fetchReleaseBody } from './github/client'
@@ -30,6 +34,16 @@ import { postToTwitter } from './notifications/twitter'
 import { runParityCheck } from './parity/runParityCheck'
 import { triggerParityCheck } from './parity/trigger'
 import { runWatchdog } from './monitors/watchdog'
+import { loadSchedules } from './scheduler/schema'
+import type { Schedules } from './scheduler/schema'
+import {
+  HANDLERS,
+  HANDLER_NAMES,
+  createHandlerContext,
+} from './scheduler/handlers'
+import { loadSchedulerState, saveSchedulerState } from './scheduler/state'
+import { runTick, nextRun, FAILURE_ALERT_THRESHOLD } from './scheduler/dispatch'
+import { mirrorToSlack } from './notifications/slack'
 import { getErrorMessage } from './utils/error'
 
 // Cloud Logging keys log severity off a top-level `severity` field, NOT
@@ -94,9 +108,44 @@ function asyncHandler(
   }
 }
 
+/**
+ * Shared-secret guard for every scheduler-invoked route. When POLLER_TOKEN is
+ * unset the endpoint stays open (so dev works) but says so loudly, since a
+ * silently-open trigger endpoint in prod is the failure worth catching.
+ */
+export function authorizeSchedulerRequest(
+  req: Request,
+  res: Response,
+  config: AppConfig,
+  route: string
+): boolean {
+  if (!config.pollerToken) {
+    logger.warn(
+      `${route} called without POLLER_TOKEN configured — endpoint is open`
+    )
+    return true
+  }
+  if (req.headers['x-cloud-scheduler-token'] !== config.pollerToken) {
+    logger.warn(`Unauthorized ${route} request`, {
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    })
+    res.status(401).json({ error: 'Unauthorized' })
+    return false
+  }
+  return true
+}
+
 async function start(): Promise<void> {
   const config = await loadConfig()
   const storage = new Storage({ projectId: config.gcpProjectId })
+
+  // Parse the schedule table at startup so a bad cron expression or an unknown
+  // handler name crashes the deploy instead of becoming a job that never fires.
+  const schedules = loadSchedules(HANDLER_NAMES)
+  logger.info('Schedule table loaded', {
+    jobs: schedules.jobs.map((j) => `${j.name} (${j.cron} ${j.tz})`),
+  })
 
   app.post(
     '/webhook',
@@ -129,6 +178,23 @@ async function start(): Promise<void> {
     '/monitors',
     express.json(),
     asyncHandler((req, res) => handleMonitors(req, res, config, storage))
+  )
+
+  // The single entry point for every recurring job. One Cloud Scheduler job
+  // POSTs here every 5 minutes; config/schedules.yaml decides what is due.
+  app.post(
+    '/tick',
+    express.json(),
+    asyncHandler((req, res) => handleTick(req, res, config, storage, schedules))
+  )
+
+  // Answers "did the weekly report fire, and when is the next one?" without
+  // opening the GCP console.
+  app.get(
+    '/schedules',
+    asyncHandler((req, res) =>
+      handleSchedules(req, res, config, storage, schedules)
+    )
   )
 
   app.get('/', (_req, res) => {
@@ -205,16 +271,9 @@ export async function handleParity(
   config: AppConfig,
   storage: Storage
 ): Promise<void> {
-  // Same shared-secret guard as /poll — the worker must only be callable by our
-  // own dispatch (or an operator holding the token).
-  if (config.pollerToken) {
-    const provided = req.headers['x-cloud-scheduler-token']
-    if (provided !== config.pollerToken) {
-      logger.warn('Unauthorized /parity request', { ip: req.ip })
-      res.status(401).json({ error: 'Unauthorized' })
-      return
-    }
-  }
+  // The worker must only be callable by our own dispatch (or an operator
+  // holding the token).
+  if (!authorizeSchedulerRequest(req, res, config, '/parity')) return
 
   const version = (req.body as { version?: string } | undefined)?.version
   if (!version) {
@@ -249,22 +308,7 @@ export async function handleMonitors(
   config: AppConfig,
   storage: Storage
 ): Promise<void> {
-  // Same auth as /poll — Cloud Scheduler holds the shared token.
-  if (config.pollerToken) {
-    const provided = req.headers['x-cloud-scheduler-token']
-    if (provided !== config.pollerToken) {
-      logger.warn('Unauthorized /monitors request', {
-        ip: req.ip,
-        userAgent: req.headers['user-agent'],
-      })
-      res.status(401).json({ error: 'Unauthorized' })
-      return
-    }
-  } else {
-    logger.warn(
-      '/monitors called without POLLER_TOKEN configured — endpoint is open'
-    )
-  }
+  if (!authorizeSchedulerRequest(req, res, config, '/monitors')) return
 
   const body = (req.body ?? {}) as { dryRun?: boolean }
   const dryRun = body.dryRun === true
@@ -282,30 +326,97 @@ export async function handleMonitors(
   })
 }
 
+export async function handleTick(
+  req: Request,
+  res: Response,
+  config: AppConfig,
+  storage: Storage,
+  schedules: Schedules
+): Promise<void> {
+  if (!authorizeSchedulerRequest(req, res, config, '/tick')) return
+
+  const dryRun = (req.body as { dryRun?: boolean } | undefined)?.dryRun === true
+  const now = new Date()
+
+  const state = await loadSchedulerState(storage, logger)
+  const results = await runTick(
+    schedules,
+    state,
+    HANDLERS,
+    createHandlerContext(config, storage, logger, now, dryRun),
+    { now, dryRun }
+  )
+
+  // Persist even when some jobs failed — the successes and the incremented
+  // failure counters both need to survive this request.
+  if (!dryRun) await saveSchedulerState(storage, state)
+
+  const broken = results.filter(
+    (r) => r.action === 'failed' && (r.failures ?? 0) >= FAILURE_ALERT_THRESHOLD
+  )
+  if (broken.length && !dryRun) {
+    // The notifier reports its own breakage through the same path it reports
+    // everything else, rather than failing silently on a schedule nobody watches.
+    const payload = envelope({
+      fallback: 'Scheduled job failing',
+      color: '#E53935',
+      title: `${broken.length} scheduled job(s) failing`,
+      text: broken
+        .map(
+          (r) =>
+            `- \`${r.job}\` — ${r.failures} consecutive failures: ${r.error}`
+        )
+        .join('\n'),
+    })
+    await postToMattermost(config.mattermostWebhookUrl, payload).catch((err) =>
+      logger.error('Failed to post scheduler failure alert', {
+        error: getErrorMessage(err),
+      })
+    )
+    await mirrorToSlack(config.slackWebhookUrl, payload, logger)
+  }
+
+  const ran = results.filter((r) => r.action === 'ran').length
+  if (ran || broken.length) {
+    logger.info('Tick complete', { ran, failed: broken.length, dryRun })
+  }
+  res.status(200).json({ action: 'ticked', dryRun, results })
+}
+
+export async function handleSchedules(
+  req: Request,
+  res: Response,
+  config: AppConfig,
+  storage: Storage,
+  schedules: Schedules
+): Promise<void> {
+  if (!authorizeSchedulerRequest(req, res, config, '/schedules')) return
+
+  const state = await loadSchedulerState(storage, logger)
+  const now = new Date()
+
+  res.status(200).json({
+    jobs: schedules.jobs.map((job) => ({
+      name: job.name,
+      description: job.description,
+      cron: job.cron,
+      tz: job.tz,
+      handler: job.handler,
+      enabled: job.enabled,
+      lastRun: state.jobs[job.name]?.lastRun ?? null,
+      failures: state.jobs[job.name]?.failures ?? 0,
+      nextRun: job.enabled ? nextRun(job, now).toISOString() : null,
+    })),
+  })
+}
+
 export async function handlePoll(
   req: Request,
   res: Response,
   config: AppConfig,
   storage: Storage
 ): Promise<void> {
-  // Auth: /poll must only be callable by Cloud Scheduler (or anyone holding
-  // the shared token). If POLLER_TOKEN is unset, the endpoint is open — log
-  // a warning so the misconfiguration is visible, but don't break dev.
-  if (config.pollerToken) {
-    const provided = req.headers['x-cloud-scheduler-token']
-    if (provided !== config.pollerToken) {
-      logger.warn('Unauthorized /poll request', {
-        ip: req.ip,
-        userAgent: req.headers['user-agent'],
-      })
-      res.status(401).json({ error: 'Unauthorized' })
-      return
-    }
-  } else {
-    logger.warn(
-      '/poll called without POLLER_TOKEN configured — endpoint is open'
-    )
-  }
+  if (!authorizeSchedulerRequest(req, res, config, '/poll')) return
 
   // Operators can pass `{ "dryRun": true }` to exercise the FULL pipeline
   // against production secrets/state/network WITHOUT posting or mutating GCS

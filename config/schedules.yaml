@@ -1,0 +1,54 @@
+# Recurring jobs. This file is the ONLY place a schedule is declared — changing
+# a cadence is a PR diff, not a `gcloud scheduler` invocation.
+#
+# One Cloud Scheduler job POSTs /tick every 5 minutes; the dispatcher decides
+# what is due. A job is due when at least one cron occurrence has passed since
+# its last successful run, so downtime causes ONE catch-up run, never a burst.
+#
+# `handler` must name an entry in src/scheduler/handlers.ts — an unknown
+# handler fails validation at load rather than silently never running.
+
+jobs:
+  # Vet chases this in #team-updates most weeks. Friday afternoon so the draft
+  # is ready for either posting window he offers ("today or Monday").
+  - name: weekly-update
+    description: >-
+      Drafts Denis's weekly team update from the week's GitHub activity,
+      tagged [partner]/[board]/[internal]. A draft to edit, never a final post.
+    cron: '0 16 * * FRI'
+    tz: Europe/Amsterdam
+    handler: weeklyUpdate
+    enabled: true
+
+  # Denis in #xrplf-leaders (2026-08-09): "run a review every week to see who is
+  # the top. That way we don't miss stuff like this?"
+  - name: validator-review
+    description: >-
+      Weekly dUNL reliability review — 30d agreement, version spread, and any
+      member that is partial-only, revoked, or invisible to the data source.
+    cron: '0 9 * * MON'
+    tz: Europe/Amsterdam
+    handler: validatorReview
+    enabled: true
+
+  # XLS-50 is Final and makes network_asn a MUST, so compliance needs no new
+  # policy decision. Monthly because TOMLs change slowly. Also the only
+  # automated source of the validator hardware inventory.
+  - name: validator-toml
+    description: >-
+      XLS-50 / domain-verification sweep across the dUNL — who publishes a TOML
+      listing their own key, who declares network_asn, ASN/country concentration,
+      and declared hardware.
+    cron: '0 9 1 * *'
+    tz: Europe/Amsterdam
+    handler: validatorToml
+    enabled: true
+
+  - name: unl-pr-queue
+    description: >-
+      Weekly digest of the XRPLF/unl PR queue — inclusion requests, removal
+      requests, and how long each has been waiting.
+    cron: '0 9 * * MON'
+    tz: Europe/Amsterdam
+    handler: unlPrQueue
+    enabled: true
