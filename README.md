@@ -102,6 +102,32 @@ npx ts-node scripts/dry-run.ts 2.2.0 --parity   # build reference, audit each SD
 
 **Roadmap (not in the first cut):** open/update tracking issues on lagging SDK repos on beta/RC; a failing status check on FINAL when not at parity; PR comments on SDK PRs touching `definitions.json`. These are deferred because they write to other repos (need `issues:write` / status scope) — the first cut only reads and posts to Mattermost.
 
+## XLS spec-parity check
+
+The third parity leg. SDK parity asks whether the SDKs implemented what the code defines; docs parity asks whether xrpl.org documents it; this asks whether **the code still matches the specification each amendment was approved under** (`XRPLF/XRPL-Standards`). All three hang off the same hub — the code — so no SDK↔spec or docs↔spec edge is needed.
+
+Deterministic, no agent. Every rule is one of XLS-1's own, cited in the report:
+
+- **Coverage** — §3.1 "every feature amendment must have an XLS". An amendment with no spec is a hard gap. `fix*` amendments are bug fixes, not features, and amendments predating the process are listed in `config/xls-map.yaml` — both are exempt, never gaps.
+- **Status** — §4 "the XLS can only be considered `Final` once the rippled PR has been merged", and "only a `Final` feature may be `Deprecated`". A votable amendment whose spec is still `Draft` is a gap; a `Withdrawn` spec with a votable amendment is a contradiction.
+- **Surface drift** — the spec's field tables, flag names, and result codes vs `transactions.macro` / `ledger_entries.macro` / `TxFlags.h` / `LedgerFormats.h` / `TER.h`.
+- **Process lint** (sweep only) — preamble completeness and §4.3.1 limits, required sections, `Final` specs that link no rippled PR, and Drafts untouched past the §4 six-month mark.
+
+**The direction that matters.** A spec that *amends* an existing type lists only the fields it changes — XLS-85 documents exactly `Amount` for `EscrowCreate` — so "the format has a field the spec doesn't mention" is only a finding for a type the release *introduces* and the spec fully defines (detected by the spec carrying a row for every `SoeRequired` field). The other direction is always a finding: a field, flag, or result code the spec names and the protocol doesn't have is drift. That is what the check is for — it found `lsfMPTokenLock` (code: `lsfMPTLocked`) in XLS-85, `tfALLORNOTHING` in XLS-56, and `tecOBJECT_NO_FOUND` in XLS-82.
+
+**Amendment → spec resolution** is the load-bearing part, since `features.macro` carries no XLS number and specs carry no amendment name. In precedence order: the alias file, the XLS links already on xrpl.org's `known-amendments.md`, the directory slug, the spec title, then a `featureX` mention in the body. Anything unresolved is *reported* as unresolved — never guessed, because a wrong mapping manufactures a page of fake drift. `test/unit/parity/xlsMapping.test.ts` fails the suite if a new amendment stops resolving.
+
+Triggered per release (delta: the amendments this release adds) and monthly via `config/schedules.yaml` (full sweep + process lint), because specs drift on their own timeline and would otherwise never be checked.
+
+```bash
+npx ts-node scripts/run-parity.ts 3.2.0 --dry --xls-only          # per-release delta
+npx ts-node scripts/run-parity.ts 3.2.1 --full --dry --xls-only   # full sweep
+npx ts-node scripts/xls-mapping-audit.ts                          # offline: every amendment -> spec, and why
+npx ts-node scripts/xls-mapping-audit.ts --drift 85               # offline: findings for one spec
+```
+
+**Known limit:** "the transactor never returns this code" cannot be decided from the transactor source alone — plenty of codes come from shared helpers — so that check reports an `info` hint naming what it searched, and never a gap. Confirming it, and behavioural spec-vs-code drift generally (the [XLS-68 audit](https://github.com/Transia-RnD/xrpl-guides) class of finding), is semantic work left to a future agent pass.
+
 ## Deployment
 
 Deployed to GCP Cloud Run via Cloud Build:

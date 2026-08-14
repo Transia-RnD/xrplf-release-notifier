@@ -12,6 +12,10 @@ import { splitRepo } from './sdks'
  */
 
 const MACRO_DIR = 'include/xrpl/protocol/detail'
+const TX_FLAGS_PATH = 'include/xrpl/protocol/TxFlags.h'
+const LEDGER_FORMATS_PATH = 'include/xrpl/protocol/LedgerFormats.h'
+const TER_PATH = 'include/xrpl/protocol/TER.h'
+const INNER_OBJECTS_PATH = 'src/libxrpl/protocol/InnerObjectFormats.cpp'
 
 export type FeatureKind = 'transactionType' | 'ledgerEntryType' | 'field'
 
@@ -26,6 +30,27 @@ export interface FieldSpec {
   required: boolean
 }
 
+/**
+ * Flag names owned by each type, parsed from the XMACRO blocks in TxFlags.h /
+ * LedgerFormats.h. Absent when the ref predates that layout (rippled < 3.2) —
+ * consumers must treat missing as "flags unknown", not "type has no flags".
+ */
+export interface FlagSets {
+  /** `TRANSACTION(Payment, TF_FLAG(tfPartialPayment, …))` -> Payment: [tf…]. */
+  txFlags: Record<string, string[]>
+  /** `LEDGER_OBJECT(Credential, LSF_FLAG(lsfAccepted, …))` -> Credential: [lsf…]. */
+  ledgerFlags: Record<string, string[]>
+  /** `ASF_FLAG(asfRequireDest, 1)` — AccountSet SetFlag/ClearFlag values. */
+  accountSetFlags: string[]
+  /**
+   * Every flag name the headers declare, including the families declared as
+   * plain constants outside the per-type blocks (the `tmf*`/`lsmf*` MPT flags).
+   * This is the vocabulary check — "does this flag exist at all" — as distinct
+   * from the per-type sets above, which answer "which type owns it".
+   */
+  allFlags: string[]
+}
+
 export interface FeatureSets {
   transactionTypes: string[]
   ledgerEntryTypes: string[]
@@ -38,6 +63,16 @@ export interface FeatureSets {
    */
   txFields?: Record<string, FieldSpec[]>
   ledgerEntryFields?: Record<string, FieldSpec[]>
+  /** Per-type flag names; absent when the ref predates the flag XMACRO layout. */
+  flags?: FlagSets
+  /** Every transaction result code the protocol defines (TER.h enum names). */
+  resultCodes?: string[]
+  /**
+   * Fields that are members of an inner-object template (SignerEntry's
+   * `Account`, Credential's `Issuer`, …). A spec documenting one under a
+   * transaction is describing a nested object, not misplacing a field.
+   */
+  innerObjectFields?: string[]
   /** Votable amendment names (Supported::Yes) — context only; also seeds PR stems. */
   amendments: string[]
   /**
@@ -173,6 +208,82 @@ export function parseLedgerEntryFieldSpecs(
   return parseFieldSpecBlocks(macro, LE_BLOCK_RE)
 }
 
+/** Member field names of every inner-object template (InnerObjectFormats.cpp). */
+export function parseInnerObjectFields(source: string): string[] {
+  return [...new Set([...source.matchAll(SPEC_FIELD_RE)].map((m) => m[1]))]
+}
+
+// Enum entries in TER.h: telLOCAL_ERROR = -399, telBAD_DOMAIN, …
+const RESULT_CODE_RE = /^\s*((?:tel|tem|tef|ter|tec|tes)[A-Z][A-Z0-9_]*)/gm
+
+/** Every result-code name TER.h defines — the vocabulary a spec may cite. */
+export function parseResultCodes(header: string): string[] {
+  return [...stripComments(header).matchAll(RESULT_CODE_RE)].map((m) => m[1])
+}
+
+/** Fields the format marks SoeRequired — the spine of a type's definition. */
+export function requiredFields(spec: FieldSpec[] | undefined): string[] {
+  return (spec ?? []).filter((f) => f.required).map((f) => f.name)
+}
+
+/** Drop block and line comments so commented-out flag entries never parse. */
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ')
+}
+
+// TRANSACTION(LoanPay, TF_FLAG(tfLoanOverpayment, 0x…) …, MASK_ADJ(0))
+// The body is guarded against swallowing the next block if MASK_ADJ is absent.
+const TX_FLAG_BLOCK_RE =
+  /TRANSACTION\(\s*([A-Za-z0-9_]+)\s*,((?:(?!TRANSACTION\()[\s\S])*?)MASK_ADJ\(/g
+// LEDGER_OBJECT(Credential, LSF_FLAG(lsfAccepted, 0x…))
+const LE_FLAG_BLOCK_RE =
+  /LEDGER_OBJECT\(\s*([A-Za-z0-9_]+)\s*,((?:(?!LEDGER_OBJECT\()[\s\S])*?)\)\)/g
+const TF_FLAG_RE = /TF_FLAG2?\(\s*(tf[A-Za-z0-9_]+)\s*,/g
+const LSF_FLAG_RE = /LSF_FLAG2?\(\s*(lsf[A-Za-z0-9_]+)\s*,/g
+const ASF_FLAG_RE = /ASF_FLAG\(\s*(asf[A-Za-z0-9_]+)\s*,\s*\d+\s*\)/g
+
+function parseFlagBlocks(
+  header: string,
+  blockRe: RegExp,
+  flagRe: RegExp
+): Record<string, string[]> {
+  const out: Record<string, string[]> = {}
+  for (const block of stripComments(header).matchAll(blockRe)) {
+    const names = [...block[2].matchAll(flagRe)].map((m) => m[1])
+    if (names.length > 0) out[block[1]] = names
+  }
+  return out
+}
+
+/** Per-transaction flag names from TxFlags.h. */
+export function parseTxFlags(header: string): Record<string, string[]> {
+  return parseFlagBlocks(header, TX_FLAG_BLOCK_RE, TF_FLAG_RE)
+}
+
+/** Per-ledger-object flag names from LedgerFormats.h. */
+export function parseLedgerFlags(header: string): Record<string, string[]> {
+  return parseFlagBlocks(header, LE_FLAG_BLOCK_RE, LSF_FLAG_RE)
+}
+
+/** AccountSet SetFlag/ClearFlag names from the ACCOUNTSET_FLAGS block. */
+export function parseAccountSetFlags(header: string): string[] {
+  return [...stripComments(header).matchAll(ASF_FLAG_RE)].map((m) => m[1])
+}
+
+// Flags also arrive as plain constants — the tmf*/lsmf* MPT families live
+// outside the per-type XMACRO blocks entirely.
+const FLAG_CONSTANT_RE =
+  /\b((?:tf|tmf|lsf|lsmf|asf)[A-Z][A-Za-z0-9_]*)\s*(?:=|,)/g
+
+/** Every flag name a header declares, however it declares it. */
+export function parseAllFlagNames(header: string): string[] {
+  return [
+    ...new Set(
+      [...stripComments(header).matchAll(FLAG_CONSTANT_RE)].map((m) => m[1])
+    ),
+  ]
+}
+
 function matchAll(macro: string, re: RegExp): string[] {
   const out: string[] = []
   for (const line of macro.split('\n')) {
@@ -182,21 +293,70 @@ function matchAll(macro: string, re: RegExp): string[] {
   return out
 }
 
+/**
+ * Flag sets for a ref, or undefined when nothing parses — refs before the
+ * XMACRO layout (rippled < 3.2) declare flags as loose constants, and reporting
+ * "no flags" there would flag every documented flag as drift.
+ */
+function parseFlagSets(
+  txFlagsHeader: string | null,
+  ledgerFormatsHeader: string | null
+): FlagSets | undefined {
+  const txFlags = txFlagsHeader ? parseTxFlags(txFlagsHeader) : {}
+  const ledgerFlags = ledgerFormatsHeader
+    ? parseLedgerFlags(ledgerFormatsHeader)
+    : {}
+  const accountSetFlags = txFlagsHeader
+    ? parseAccountSetFlags(txFlagsHeader)
+    : []
+  const allFlags = [
+    ...new Set([
+      ...(txFlagsHeader ? parseAllFlagNames(txFlagsHeader) : []),
+      ...(ledgerFormatsHeader ? parseAllFlagNames(ledgerFormatsHeader) : []),
+    ]),
+  ]
+  const parsedAnything =
+    Object.keys(txFlags).length > 0 ||
+    Object.keys(ledgerFlags).length > 0 ||
+    accountSetFlags.length > 0
+  return parsedAnything
+    ? { txFlags, ledgerFlags, accountSetFlags, allFlags }
+    : undefined
+}
+
 async function fetchSets(
   repo: string,
   ref: string,
   token: string | undefined
 ): Promise<FeatureSets | null> {
-  const [features, transactions, ledgerEntries, sfields] = await Promise.all([
+  const [
+    features,
+    transactions,
+    ledgerEntries,
+    sfields,
+    txFlags,
+    ledgerFlags,
+    terHeader,
+    innerObjects,
+  ] = await Promise.all([
     getFileAtRef(repo, `${MACRO_DIR}/features.macro`, ref, token),
     getFileAtRef(repo, `${MACRO_DIR}/transactions.macro`, ref, token),
     getFileAtRef(repo, `${MACRO_DIR}/ledger_entries.macro`, ref, token),
     getFileAtRef(repo, `${MACRO_DIR}/sfields.macro`, ref, token),
+    getFileAtRef(repo, TX_FLAGS_PATH, ref, token),
+    getFileAtRef(repo, LEDGER_FORMATS_PATH, ref, token),
+    getFileAtRef(repo, TER_PATH, ref, token),
+    getFileAtRef(repo, INNER_OBJECTS_PATH, ref, token),
   ])
   // transactions + sfields are load-bearing; if either is missing at this ref
   // the macro layout has changed and we can't trust the parse.
   if (!transactions || !sfields || !ledgerEntries) return null
   return {
+    flags: parseFlagSets(txFlags, ledgerFlags),
+    resultCodes: terHeader ? parseResultCodes(terHeader) : undefined,
+    innerObjectFields: innerObjects
+      ? parseInnerObjectFields(innerObjects)
+      : undefined,
     transactionTypes: parseTransactionTypes(transactions),
     ledgerEntryTypes: parseLedgerEntryTypes(ledgerEntries),
     fields: parseFields(sfields),

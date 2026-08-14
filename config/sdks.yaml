@@ -24,3 +24,11 @@ sdks:
 docs:
   repo: XRPLF/xrpl-dev-portal
   ref: master
+
+# The specification-parity target: the standard each amendment was approved
+# under. Amendment -> spec resolution and the legacy/alias exceptions live in
+# config/xls-map.yaml; the checks themselves are XLS-1's own rules, encoded in
+# src/parity/xlsChecks.ts.
+xls:
+  repo: XRPLF/XRPL-Standards
+  ref: master

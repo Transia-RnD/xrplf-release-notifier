@@ -28,16 +28,25 @@ const DocsSchema = z.object({
   ref: z.string().min(1),
 })
 
+const XlsSchema = z.object({
+  /** GitHub `owner/repo` of the standards repo, e.g. "XRPLF/XRPL-Standards". */
+  repo: z.string().regex(/^[^/]+\/[^/]+$/, 'repo must be "owner/name"'),
+  /** Branch specs are merged to. */
+  ref: z.string().min(1),
+})
+
 const ConfigSchema = z.object({
   rippled: z.object({
     repo: z.string().regex(/^[^/]+\/[^/]+$/, 'repo must be "owner/name"'),
   }),
   sdks: z.array(SdkSchema).min(1),
   docs: DocsSchema,
+  xls: XlsSchema,
 })
 
 export type SdkTarget = z.infer<typeof SdkSchema>
 export type DocsTarget = z.infer<typeof DocsSchema>
+export type XlsTarget = z.infer<typeof XlsSchema>
 export type ParityConfig = z.infer<typeof ConfigSchema>
 
 /**
@@ -60,6 +69,33 @@ export function loadParityConfig(
   const config = ConfigSchema.parse(parsed)
   if (configPath === CONFIG_PATH) cached = config
   return config
+}
+
+const XlsMapSchema = z.object({
+  /** Amendment name -> XLS number, overriding every inferred match. */
+  aliases: z.record(z.string(), z.number().int().positive()).default({}),
+  /** Amendments that predate the XLS process — "no spec" is correct for them. */
+  legacy: z.array(z.string()).default([]),
+})
+
+export type XlsMap = z.infer<typeof XlsMapSchema>
+
+const XLS_MAP_PATH = path.resolve(
+  __dirname,
+  '..',
+  '..',
+  'config',
+  'xls-map.yaml'
+)
+
+let cachedXlsMap: XlsMap | null = null
+
+/** Load and validate config/xls-map.yaml. Cached after first read. */
+export function loadXlsMap(configPath: string = XLS_MAP_PATH): XlsMap {
+  if (cachedXlsMap && configPath === XLS_MAP_PATH) return cachedXlsMap
+  const map = XlsMapSchema.parse(yaml.load(readFileSync(configPath, 'utf8')))
+  if (configPath === XLS_MAP_PATH) cachedXlsMap = map
+  return map
 }
 
 /** Split an "owner/name" string into its parts. */

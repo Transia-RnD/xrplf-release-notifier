@@ -7,7 +7,7 @@ import { finalTagExists } from '../version/predecessor'
 import { postToMattermost } from '../notifications/mattermost'
 import type { MattermostPayload } from '../notifications/mattermost'
 import { mirrorToSlack } from '../notifications/slack'
-import { loadParityConfig } from './sdks'
+import { loadParityConfig, loadXlsMap } from './sdks'
 import type { SdkTarget } from './sdks'
 import { buildReference, fullTypeChecklist, deltaChecklist } from './reference'
 import type { Reference, Feature } from './reference'
@@ -27,6 +27,7 @@ import type { LocationsCache } from './cache'
 import { formatParityReport } from './report'
 import type { SdkReport } from './report'
 import { runDocsCheck } from './runDocsCheck'
+import { runXlsCheck } from './runXlsCheck'
 
 export interface ParityDeps {
   config: AppConfig
@@ -66,11 +67,14 @@ export interface RunParityOptions {
   dryRun?: boolean
   /** Skip the per-SDK agent scans and run only the docs-parity check. */
   docsOnly?: boolean
+  /** Skip the SDK and docs checks and run only the XLS spec-parity check. */
+  xlsOnly?: boolean
 }
 
 export interface ParityPayloads {
   sdk?: MattermostPayload
   docs?: MattermostPayload
+  xls?: MattermostPayload
 }
 
 export async function runParityCheck(
@@ -133,7 +137,7 @@ export async function runParityCheck(
 
     const payloads: ParityPayloads = {}
 
-    if (!opts.docsOnly) {
+    if (!opts.docsOnly && !opts.xlsOnly) {
       const sdks: SdkReport[] = []
       const cache = await loadLocationsCache(storage)
 
@@ -187,28 +191,60 @@ export async function runParityCheck(
     // Docs parity runs even when the SDK checklist is empty: its delta also
     // covers ledger entries and amendments, which the SDK check excludes.
     // Isolated so a docs failure (or a failed post) can't sink the SDK report.
-    try {
-      const docsPayload = await runDocsCheck({
-        reference,
-        versionType: version.type,
-        mode,
-        docs: parityConfig.docs,
-        githubToken: config.githubToken,
-        logger,
-      })
-      if (docsPayload) {
-        payloads.docs = docsPayload
-        if (!opts.dryRun) {
-          await postToMattermost(config.mattermostWebhookUrl, docsPayload)
-          await mirrorToSlack(config.slackWebhookUrl, docsPayload, logger)
-          logger.info('Docs parity report posted', { tag, mode })
+    if (!opts.xlsOnly) {
+      try {
+        const docsPayload = await runDocsCheck({
+          reference,
+          versionType: version.type,
+          mode,
+          docs: parityConfig.docs,
+          githubToken: config.githubToken,
+          logger,
+        })
+        if (docsPayload) {
+          payloads.docs = docsPayload
+          if (!opts.dryRun) {
+            await postToMattermost(config.mattermostWebhookUrl, docsPayload)
+            await mirrorToSlack(config.slackWebhookUrl, docsPayload, logger)
+            logger.info('Docs parity report posted', { tag, mode })
+          }
         }
+      } catch (err: unknown) {
+        logger.error('Docs parity step failed', {
+          tag,
+          error: getErrorMessage(err),
+        })
       }
-    } catch (err: unknown) {
-      logger.error('Docs parity step failed', {
-        tag,
-        error: getErrorMessage(err),
-      })
+    }
+
+    // XLS parity — the third leg: does the code still match the specification
+    // each amendment was approved under? Isolated for the same reason.
+    if (!opts.docsOnly) {
+      try {
+        const xlsPayload = await runXlsCheck({
+          reference,
+          versionType: version.type,
+          mode,
+          xls: parityConfig.xls,
+          docs: parityConfig.docs,
+          xlsMap: loadXlsMap(),
+          githubToken: config.githubToken,
+          logger,
+        })
+        if (xlsPayload) {
+          payloads.xls = xlsPayload
+          if (!opts.dryRun) {
+            await postToMattermost(config.mattermostWebhookUrl, xlsPayload)
+            await mirrorToSlack(config.slackWebhookUrl, xlsPayload, logger)
+            logger.info('XLS parity report posted', { tag, mode })
+          }
+        }
+      } catch (err: unknown) {
+        logger.error('XLS parity step failed', {
+          tag,
+          error: getErrorMessage(err),
+        })
+      }
     }
 
     return payloads

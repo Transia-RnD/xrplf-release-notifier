@@ -6,6 +6,13 @@ import {
   parseFields,
   parseTxFieldSpecs,
   parseLedgerEntryFieldSpecs,
+  parseTxFlags,
+  parseLedgerFlags,
+  parseAccountSetFlags,
+  parseAllFlagNames,
+  parseResultCodes,
+  parseInnerObjectFields,
+  requiredFields,
   buildReference,
   fullTypeChecklist,
   deltaChecklist,
@@ -308,5 +315,110 @@ describe('buildReference', () => {
     expect(ref.added).toEqual([])
     expect(ref.addedAmendments).toEqual([])
     expect(ref.addedUnsupportedAmendments).toEqual([])
+  })
+})
+
+describe('flag parsing', () => {
+  const TX_FLAGS = `
+inline constexpr FlagValue tfFullyCanonicalSig = 0x80000000;
+
+#define XMACRO(TRANSACTION, TF_FLAG, TF_FLAG2, MASK_ADJ)   \\
+    TRANSACTION(Payment,                                   \\
+        TF_FLAG(tfNoRippleDirect, 0x00010000)              \\
+        TF_FLAG(tfPartialPayment, 0x00020000),             \\
+        MASK_ADJ(0))                                       \\
+                                                           \\
+    TRANSACTION(LoanPay,                                   \\
+        TF_FLAG2(tfLoanOverpayment, 0x00010000)            \\
+        TF_FLAG(tfLoanFullPayment, 0x00020000),            \\
+        MASK_ADJ(0))
+
+#define ACCOUNTSET_FLAGS(ASF_FLAG)     \\
+    ASF_FLAG(asfRequireDest, 1)        \\
+    /* ASF_FLAG(asfTshCollect, 11) */  \\
+    ASF_FLAG(asfNoFreeze, 6)
+
+inline constexpr FlagValue tmfMPTSetCanLock = 0x00000001;
+`
+
+  const LEDGER_FORMATS = `
+    LEDGER_OBJECT(Credential,
+        LSF_FLAG(lsfAccepted, 0x00010000))
+
+    LEDGER_OBJECT(MPToken,
+        LSF_FLAG2(lsfMPTLocked, 0x00000001)
+        LSF_FLAG(lsfMPTAuthorized, 0x00000002))
+`
+
+  it('reads per-transaction flags, including the TF_FLAG2 form', () => {
+    const flags = parseTxFlags(TX_FLAGS)
+    expect(flags.Payment).toEqual(['tfNoRippleDirect', 'tfPartialPayment'])
+    expect(flags.LoanPay).toEqual(['tfLoanOverpayment', 'tfLoanFullPayment'])
+  })
+
+  it('reads per-ledger-object flags, including the LSF_FLAG2 form', () => {
+    const flags = parseLedgerFlags(LEDGER_FORMATS)
+    expect(flags.Credential).toEqual(['lsfAccepted'])
+    expect(flags.MPToken).toEqual(['lsfMPTLocked', 'lsfMPTAuthorized'])
+  })
+
+  it('skips commented-out AccountSet flags', () => {
+    const asf = parseAccountSetFlags(TX_FLAGS)
+    expect(asf).toEqual(['asfRequireDest', 'asfNoFreeze'])
+  })
+
+  it('collects flags declared outside the per-type blocks', () => {
+    // The tmf*/lsmf* MPT families are plain constants; missing them would
+    // report every MPT flag a spec names as undefined.
+    expect(parseAllFlagNames(TX_FLAGS)).toContain('tmfMPTSetCanLock')
+  })
+})
+
+describe('parseResultCodes', () => {
+  it('reads the TER.h enum names', () => {
+    const header = `
+enum TELcodes : TERUnderlyingType {
+    telLOCAL_ERROR = -399,
+    telBAD_DOMAIN,
+};
+enum TECcodes : TERUnderlyingType {
+    tecCLAIM = 100,
+    tecFROZEN = 137,
+};
+`
+    expect(parseResultCodes(header)).toEqual([
+      'telLOCAL_ERROR',
+      'telBAD_DOMAIN',
+      'tecCLAIM',
+      'tecFROZEN',
+    ])
+  })
+})
+
+describe('parseInnerObjectFields', () => {
+  it('reads the member fields of every inner-object template', () => {
+    const source = `
+    add(sfSigner.jsonName, sfSigner.getCode(),
+        {
+            {sfAccount, SoeRequired},
+            {sfSigningPubKey, SoeRequired},
+        });
+`
+    expect(parseInnerObjectFields(source)).toEqual(['Account', 'SigningPubKey'])
+  })
+})
+
+describe('requiredFields', () => {
+  it('keeps only the SoeRequired names', () => {
+    expect(
+      requiredFields([
+        { name: 'Amount', required: true },
+        { name: 'Data', required: false },
+      ])
+    ).toEqual(['Amount'])
+  })
+
+  it('treats an unknown spec as no required fields', () => {
+    expect(requiredFields(undefined)).toEqual([])
   })
 })

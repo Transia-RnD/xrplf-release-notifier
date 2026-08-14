@@ -1,0 +1,47 @@
+# Exceptions to automatic amendment -> XLS resolution. Overrides every inferred
+# rule, so a wrong automatic match is corrected here rather than in code.
+#
+#   aliases: amendment and spec are named differently (`DID` is XLS-40,
+#            "Decentralized Identity"). Values are XLS numbers.
+#   legacy:  amendments predating the XLS process — "no XLS" is correct for
+#            them, so they are reported n/a rather than as an XLS-1 §3.1 gap.
+
+# Removing these three leaves them unresolved in scripts/xls-mapping-audit.ts;
+# every other amendment resolves on its own.
+aliases:
+  DID: 40 # "Decentralized Identity"
+  DynamicNFT: 46 # "Dynamic Non-Fungible Tokens"
+  MPTokensV1: 33 # "Multi-Purpose Tokens"
+
+legacy:
+  - CheckCashMakesTrustLine
+  - Checks
+  - CryptoConditions
+  - CryptoConditionsSuite
+  - DeletableAccounts
+  - DepositAuth
+  - DepositPreauth
+  - DisallowIncoming
+  - EnforceInvariants
+  - Escrow
+  - ExpandedSignerList
+  - FeeEscalation
+  - Flow
+  - FlowCross
+  - FlowSortStrands
+  - FlowV2
+  - HardenedValidations
+  - ImmediateOfferKilled
+  - MultiSign
+  - MultiSignReserve
+  - NegativeUNL
+  - OwnerPaysFee
+  - PayChan
+  - RequireFullyCanonicalSig
+  - SHAMapV2
+  - SortedDirectories
+  - SusPay
+  - Tickets
+  - TickSize
+  - TrustSetAuth
+  - XRPFees

@@ -34,6 +34,25 @@ export async function findPredecessorTag(
 }
 
 /**
+ * The newest FINAL tag in the repo — the "what is released right now" anchor
+ * for audits that aren't triggered by a specific release.
+ */
+export async function latestFinalTag(
+  owner: string,
+  repo: string,
+  token?: string
+): Promise<string | null> {
+  const tags = await listVersionTags(owner, repo, token)
+  return (
+    tags
+      .map((t) => ({ raw: t, normalized: t.replace(/^v/, '') }))
+      .filter((t) => !t.normalized.includes('-'))
+      .sort((a, b) => compareVersions(a.normalized, b.normalized))
+      .at(-1)?.raw ?? null
+  )
+}
+
+/**
  * Find the immediately previous tag of ANY type (beta/RC/final) before `tag`.
  * This is the right base for breaking-on-upgrade: it keeps the diff small and
  * reliable (no 300-file compare-cap truncation), and each breaking change is

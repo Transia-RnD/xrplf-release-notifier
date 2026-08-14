@@ -32,12 +32,13 @@ async function main(): Promise<void> {
   const fullMode = args.includes('--full')
   const dryRun = args.includes('--dry')
   const docsOnly = args.includes('--docs-only')
+  const xlsOnly = args.includes('--xls-only')
   const positional = args.filter((a) => !a.startsWith('--'))
   const tag = positional[0]
   const predecessorTag = fullMode ? undefined : positional[1]
   if (!tag) {
     console.error(
-      'usage: run-parity.ts <tag> [predecessorTag] [--full] [--dry] [--docs-only]'
+      'usage: run-parity.ts <tag> [predecessorTag] [--full] [--dry] [--docs-only] [--xls-only]'
     )
     process.exit(1)
   }
@@ -68,20 +69,27 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `Running ${fullMode ? 'FULL' : 'delta'} parity${docsOnly ? ' (docs only)' : ''} for ${tag}` +
+    `Running ${fullMode ? 'FULL' : 'delta'} parity${docsOnly ? ' (docs only)' : ''}${xlsOnly ? ' (XLS only)' : ''} for ${tag}` +
       `${predecessorTag ? ` (predecessor ${predecessorTag})` : ''}` +
       `${dryRun ? ' — DRY RUN (no post)' : ' — will POST to Mattermost'}…`
   )
   const payloads = await runParityCheck(
     version,
     { config, storage, logger },
-    { predecessorTag, mode: fullMode ? 'full' : 'delta', dryRun, docsOnly }
+    {
+      predecessorTag,
+      mode: fullMode ? 'full' : 'delta',
+      dryRun,
+      docsOnly,
+      xlsOnly,
+    }
   )
 
   if (dryRun) {
     for (const [label, payload] of [
       ['SDK PARITY', payloads?.sdk],
       ['DOCS PARITY', payloads?.docs],
+      ['XLS PARITY', payloads?.xls],
     ] as const) {
       if (!payload) continue
       const att = payload.attachments?.[0]

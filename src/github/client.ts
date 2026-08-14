@@ -235,6 +235,51 @@ export async function searchCode(
   }
 }
 
+/**
+ * Every file path in a repo at a ref, in ONE call (git trees API, recursive).
+ * Used to locate sources whose directory layout moves between releases — the
+ * transactors, for instance, live under `src/libxrpl/tx/transactors/` today and
+ * `src/xrpld/app/tx/detail/` in older refs. Returns null when GitHub truncates
+ * the response, since a partial tree would read as "file absent".
+ */
+export async function listTree(
+  repo: string,
+  ref: string,
+  token?: string
+): Promise<string[] | null> {
+  const url = `${GITHUB_API}/repos/${repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`
+  try {
+    const res = await axios.get<{
+      tree: { path: string; type: string }[]
+      truncated: boolean
+    }>(url, { headers: buildHeaders('application/vnd.github+json', token) })
+    if (res.data.truncated) return null
+    return res.data.tree.filter((t) => t.type === 'blob').map((t) => t.path)
+  } catch (err) {
+    if (axios.isAxiosError(err) && err.response?.status === 404) return null
+    throw err
+  }
+}
+
+/** ISO date of the most recent commit touching `path`. Null if none/404. */
+export async function lastCommitDate(
+  repo: string,
+  path: string,
+  ref: string,
+  token?: string
+): Promise<string | null> {
+  const url = `${GITHUB_API}/repos/${repo}/commits?path=${encodeURIComponent(path)}&sha=${encodeURIComponent(ref)}&per_page=1`
+  try {
+    const res = await axios.get<
+      { commit: { committer?: { date?: string } } }[]
+    >(url, { headers: buildHeaders('application/vnd.github+json', token) })
+    return res.data[0]?.commit?.committer?.date ?? null
+  } catch (err) {
+    if (axios.isAxiosError(err)) return null
+    throw err
+  }
+}
+
 /** List open PRs for a repo (first 100). */
 export async function listPullRequests(
   repo: string,

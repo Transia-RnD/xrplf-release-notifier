@@ -7,6 +7,7 @@ import type { SdkInventory } from '../../../src/parity/runSdkAgent'
 import * as client from '../../../src/github/client'
 import * as cache from '../../../src/parity/cache'
 import * as docsCheck from '../../../src/parity/runDocsCheck'
+import * as xlsCheck from '../../../src/parity/runXlsCheck'
 import * as mm from '../../../src/notifications/mattermost'
 import type { AppConfig } from '../../../src/config'
 import type { VersionInfo } from '../../../src/version/types'
@@ -79,9 +80,11 @@ function mockHappyPath() {
     rippled: { repo: 'XRPLF/rippled' },
     sdks: [{ name: 'xrpl-rust', repo: 'XRPLF/xrpl-rust', ref: 'main' }],
     docs: { repo: 'XRPLF/xrpl-dev-portal', ref: 'master' },
+    xls: { repo: 'XRPLF/XRPL-Standards', ref: 'master' },
   })
-  // Docs parity has its own suite (runDocsCheck.test.ts) — quiet by default.
+  // Docs and XLS parity have their own suites — quiet by default here.
   jest.spyOn(docsCheck, 'runDocsCheck').mockResolvedValue(null)
+  jest.spyOn(xlsCheck, 'runXlsCheck').mockResolvedValue(null)
   jest.spyOn(reference, 'buildReference').mockResolvedValue(REF)
   jest.spyOn(agent, 'runSdkAgent').mockResolvedValue(INVENTORY)
   jest.spyOn(client, 'resolveRefSha').mockResolvedValue('sha1')
@@ -272,5 +275,65 @@ describe('runParityCheck (docs parity integration)', () => {
     })
     expect(payload?.sdk?.attachments?.[0]).toBeDefined()
     expect(payload?.docs).toBeUndefined()
+  })
+})
+
+describe('runParityCheck (XLS parity integration)', () => {
+  const XLS_PAYLOAD = {
+    username: 'xls parity',
+    attachments: [{ fallback: 'xls', color: '#4CAF50', pretext: 'xls ok' }],
+  }
+
+  it('returns the XLS payload alongside the other two and posts all three', async () => {
+    mockHappyPath()
+    jest.spyOn(docsCheck, 'runDocsCheck').mockResolvedValue({
+      username: 'docs parity',
+      attachments: [{ fallback: 'docs', color: '#4CAF50' }],
+    })
+    jest.spyOn(xlsCheck, 'runXlsCheck').mockResolvedValue(XLS_PAYLOAD)
+    const post = jest.spyOn(mm, 'postToMattermost').mockResolvedValue()
+
+    const payload = await runParityCheck({ ...version, raw: '9.8.5' }, deps, {
+      mode: 'delta',
+      predecessorTag: '9.8.4',
+    })
+    expect(payload?.xls).toEqual(XLS_PAYLOAD)
+    expect(post).toHaveBeenCalledTimes(3)
+    expect(xlsCheck.runXlsCheck).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reference: REF,
+        mode: 'delta',
+        xls: { repo: 'XRPLF/XRPL-Standards', ref: 'master' },
+      })
+    )
+  })
+
+  it('xlsOnly skips the SDK agents and the docs check', async () => {
+    mockHappyPath()
+    jest.spyOn(xlsCheck, 'runXlsCheck').mockResolvedValue(XLS_PAYLOAD)
+    const payload = await runParityCheck(version, deps, {
+      mode: 'delta',
+      predecessorTag: '3.1.0',
+      dryRun: true,
+      xlsOnly: true,
+    })
+    expect(agent.runSdkAgent).not.toHaveBeenCalled()
+    expect(docsCheck.runDocsCheck).not.toHaveBeenCalled()
+    expect(payload?.sdk).toBeUndefined()
+    expect(payload?.xls).toEqual(XLS_PAYLOAD)
+  })
+
+  it('an XLS-step failure never sinks the other reports', async () => {
+    mockHappyPath()
+    jest
+      .spyOn(xlsCheck, 'runXlsCheck')
+      .mockRejectedValue(new Error('standards on fire'))
+    const payload = await runParityCheck(version, deps, {
+      mode: 'delta',
+      predecessorTag: '3.1.0',
+      dryRun: true,
+    })
+    expect(payload?.sdk?.attachments?.[0]).toBeDefined()
+    expect(payload?.xls).toBeUndefined()
   })
 })
