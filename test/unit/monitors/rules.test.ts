@@ -30,6 +30,40 @@ describe('evaluateObservatory', () => {
     expect(r.state.observatoryAlerted).toBe(false)
   })
 
+  it('alerts once on a filling disk and clears when it drains', () => {
+    const hb = (disk_pct: number): Heartbeat => ({
+      ts: new Date(NOW).toISOString(),
+      disk_pct,
+      units: { 'vlwatch.service': 'active' },
+    })
+    // healthy disk says nothing
+    let r = evaluateObservatory(hb(40), NOW, fresh())
+    expect(r.alerts).toHaveLength(0)
+    // full disk is CRITICAL: it breaks dedup without stopping a unit
+    r = evaluateObservatory(hb(100), NOW, r.state)
+    expect(r.alerts[0]?.category).toBe('DISK_LOW')
+    expect(r.alerts[0]?.severity).toBe('CRITICAL')
+    // still full → no repeat
+    r = evaluateObservatory(hb(100), NOW, r.state)
+    expect(r.alerts).toHaveLength(0)
+    // drained → rearmed
+    r = evaluateObservatory(hb(40), NOW, r.state)
+    expect(r.state.diskLowAlerted).toBe(false)
+    expect(evaluateObservatory(hb(90), NOW, r.state).alerts[0]?.severity).toBe(
+      'WARNING'
+    )
+  })
+
+  it('leaves the disk rule silent when the heartbeat predates disk_pct', () => {
+    const hb: Heartbeat = {
+      ts: new Date(NOW).toISOString(),
+      units: { 'vlwatch.service': 'active' },
+    }
+    const r = evaluateObservatory(hb, NOW, fresh())
+    expect(r.alerts).toHaveLength(0)
+    expect(r.state.diskLowAlerted).toBe(false)
+  })
+
   it('alerts on stale heartbeat', () => {
     const hb: Heartbeat = {
       ts: new Date(NOW - HEARTBEAT_MAX_AGE_MS - 1000).toISOString(),

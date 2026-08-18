@@ -16,6 +16,9 @@ const MonitorsStateSchema = z.object({
   observatoryAlerted: z.boolean(),
   logsStaleAlerted: z.boolean(),
   nodeBadStateAlerted: z.boolean(),
+  // Defaulted so state written before this flag existed still validates as a
+  // whole, rather than falling through to per-field recovery.
+  diskLowAlerted: z.boolean().default(false),
 })
 
 /**
@@ -36,6 +39,7 @@ function recoverFields(raw: unknown): MonitorsState {
   const observatory = z.boolean().safeParse(obj.observatoryAlerted)
   const logsStale = z.boolean().safeParse(obj.logsStaleAlerted)
   const nodeBadState = z.boolean().safeParse(obj.nodeBadStateAlerted)
+  const diskLow = z.boolean().safeParse(obj.diskLowAlerted)
   return {
     nodeUnreachableStreak: streak.success
       ? streak.data
@@ -49,6 +53,9 @@ function recoverFields(raw: unknown): MonitorsState {
     nodeBadStateAlerted: nodeBadState.success
       ? nodeBadState.data
       : DEFAULT_MONITORS_STATE.nodeBadStateAlerted,
+    diskLowAlerted: diskLow.success
+      ? diskLow.data
+      : DEFAULT_MONITORS_STATE.diskLowAlerted,
   }
 }
 

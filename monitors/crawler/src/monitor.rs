@@ -363,7 +363,7 @@ fn emit_alert(alert: &Alert, alert_file: &mut std::fs::File, sink: &mut AlertSin
 pub async fn run(
     endpoints: Vec<String>,
     state_file: &str,
-    output: &str,
+    output: Option<&str>,
     unl_file: Option<&str>,
     min_validators: Option<usize>,
     alert_output: &str,
@@ -461,10 +461,15 @@ pub async fn run(
     }
     drop(tx);
 
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(output)?;
+    let mut file = match output {
+        Some(path) => Some(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?,
+        ),
+        None => None,
+    };
 
     let mut alert_file = std::fs::OpenOptions::new()
         .create(true)
@@ -516,7 +521,10 @@ pub async fn run(
         }
     });
 
-    eprintln!("[{}] logging validations to: {}", ts(), output);
+    match output {
+        Some(p) => eprintln!("[{}] logging validations to: {}", ts(), p),
+        None => eprintln!("[{}] raw validation dump off (--output unset)", ts()),
+    }
     eprintln!("[{}] logging alerts to: {}", ts(), alert_output);
 
     // Refresh the validator name map hourly (skip the immediate first tick).
@@ -613,7 +621,9 @@ pub async fn run(
                     suspicious: is_sus,
                     source: &v.source,
                 };
-                let _ = writeln!(file, "{}", serde_json::to_string(&entry).unwrap_or_default());
+                if let Some(f) = file.as_mut() {
+                    let _ = writeln!(f, "{}", serde_json::to_string(&entry).unwrap_or_default());
+                }
 
                 // Track this validator's decoded software version (key by master
                 // key when present, else the ephemeral validation key).

@@ -11,7 +11,6 @@ ExecStart=/opt/observatory/bin/xrpl-crawler monitor \
   --unl-file /opt/observatory/mainnet-unl.txt \
   --names-file /opt/observatory/validator-names.json \
   --state-file /var/lib/observatory/crawl-state.json \
-  --output /var/lib/observatory/validations.jsonl \
   --alerts /var/lib/observatory/alerts.jsonl \
   $MONITOR_FLAGS \
   --webhook-state /var/lib/observatory/monitor-alert-state.json

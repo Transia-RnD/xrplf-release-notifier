@@ -8,8 +8,9 @@
 //! and reports how many trusted validators run a build at/above a hotfix.
 //!
 //! Companion to the crawl's network-wide PATCH_ADOPTION; the same cadence
-//! (movement posts immediately, steady state heartbeats at 12h) via a dedup key
-//! that encodes the patched percent. Once no vulnerable validators remain the
+//! (banded movement posts immediately, steady state heartbeats at 12h, a healthy
+//! picture weekly) via a dedup key that bands the patched percent. Once no
+//! vulnerable validators remain the
 //! card is terminal: the all-clear posts once and the heartbeat stops — a later
 //! regression changes the percent, mints a new key, and posts immediately.
 
@@ -121,7 +122,7 @@ fn evaluate(validators: &[FeedValidator], min: (u8, u8, u8)) -> AdoptionCard {
     AdoptionCard {
         severity,
         fully_patched: vulnerable.is_empty() && reporting > 0,
-        key: format!("{min_s}@{patched_pct}"),
+        key: crate::report::adoption_key(&min_s, patched_pct, severity),
         title: format!("UNL patch adoption: {patched_pct}% of reporting validators on >={min_s}"),
         text,
         fields: vec![
@@ -169,7 +170,7 @@ pub async fn run(
         } else {
             crate::report::ADOPTION_REALERT_SECS
         };
-        sink.send_every(
+        sink.send_status(
             realert,
             card.severity,
             "UNL_PATCH_ADOPTION",
@@ -223,7 +224,7 @@ mod tests {
         assert_eq!(c.fields[0].1, "1"); // patched
         assert_eq!(c.fields[1].1, "2"); // vulnerable
         assert_eq!(c.fields[3].1, "3"); // UNL size (mainnet only)
-        assert_eq!(c.key, "3.2.1@33");
+        assert_eq!(c.key, "3.2.1@30/CRITICAL");
         assert_eq!(c.severity, Severity::Critical); // 66% vulnerable
         assert!(!c.fully_patched);
         assert!(c.text.contains("b.example"));
@@ -239,7 +240,7 @@ mod tests {
         let c = evaluate(&feed, (3, 2, 1));
         assert_eq!(c.fields[0].1, "1"); // patched
         assert_eq!(c.fields[2].1, "1"); // no version
-        assert_eq!(c.key, "3.2.1@100"); // 1/1 reporting patched
+        assert_eq!(c.key, "3.2.1@100/INFO"); // 1/1 reporting patched
         assert_eq!(c.severity, Severity::Info);
         assert!(c.fully_patched);
         assert!(c.text.contains("report no version"));
@@ -252,7 +253,7 @@ mod tests {
             v("nB", "main", true, None, None),
         ];
         let c = evaluate(&feed, (3, 2, 1));
-        assert_eq!(c.key, "3.2.1@0");
+        assert_eq!(c.key, "3.2.1@0/INFO");
         assert!(!c.fully_patched); // no evidence of patching, keep heartbeating
     }
 
@@ -273,6 +274,33 @@ mod tests {
             (3, 2, 1),
         );
         assert_ne!(low.key, high.key);
-        assert_eq!(high.key, "3.2.1@100");
+        assert_eq!(high.key, "3.2.1@100/INFO");
+    }
+
+    // Jitter inside a band must NOT mint a new key: the reporting set moves by a
+    // validator or two every poll, and every new key is a post.
+    #[test]
+    fn jitter_within_a_band_keeps_the_dedup_key() {
+        let patched = |n: usize| -> Vec<FeedValidator> {
+            (0..n)
+                .map(|i| v(&format!("nP{i}"), "main", true, Some("3.2.1"), None))
+                .collect()
+        };
+        let laggards = |n: usize| -> Vec<FeedValidator> {
+            (0..n)
+                .map(|i| v(&format!("nV{i}"), "main", true, Some("3.2.0"), None))
+                .collect()
+        };
+        let key = |p: usize, l: usize| {
+            let mut f = patched(p);
+            f.extend(laggards(l));
+            evaluate(&f, (3, 2, 1)).key
+        };
+        // 38/40 = 95% and 39/41 = 95% land in the same band → one post, not two
+        assert_eq!(key(38, 2), "3.2.1@95/INFO");
+        assert_eq!(key(39, 2), key(38, 2));
+        // a full band of movement still posts immediately, and crossing the
+        // vulnerable-share threshold carries the escalation in the key
+        assert_eq!(key(36, 4), "3.2.1@90/WARNING");
     }
 }

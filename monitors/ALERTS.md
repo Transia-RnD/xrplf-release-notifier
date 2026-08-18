@@ -6,6 +6,29 @@ INFO green, WARNING amber, CRITICAL red. "Dedup" is how re-fires are suppressed.
 Alerting is opt-in per run: a monitor only evaluates rules when given `--webhook`
 (post) or `--dry-run` (print). Without either it just does its base job.
 
+**Fault alerts vs status cards.** A fault alert fires on a condition and dedups
+per occurrence. A *status card* (`NUNL_SUMMARY`, `AMENDMENT_SUMMARY`,
+`PATCH_ADOPTION`, `UNL_PATCH_ADOPTION`) always evaluates and states the current
+picture, so it has to repeat — otherwise silence can't be told apart from a dead
+poller. Its cadence therefore depends on whether the picture needs action:
+
+- **needs action** (WARNING/CRITICAL) — re-posts on the card's own window (24h for
+  the summaries, 12h for adoption).
+- **healthy** (INFO) — re-posts weekly. A daily all-clear was the bulk of the
+  channel's volume, and observatory liveness is now reported independently by the
+  notifier watchdog (`OBSERVATORY_STALE`), which is what the daily repeat was
+  standing in for.
+- **movement always posts immediately**, at any severity, because the dedup key
+  encodes the picture itself.
+- **dedup unwritable → status cards are dropped** for that run. A status card that
+  can't be recorded posts again on the very next tick, so one missed card beats a
+  flooded channel; fault alerts are never suppressed this way. See `DISK_LOW`.
+
+Adoption keys band the percent (5-point buckets) and carry the severity. An exact
+percent in the key meant the hourly crawl's ordinary node churn minted a fresh key
+— and a post — nearly every hour; banding keeps post-on-movement for movement
+that matters, while an escalation always posts because the severity changes.
+
 ## vlwatch — UNL propagation (always-on, observatory VM)
 
 Watches validator-list gossip on the overlay and verifies each list's signature
@@ -58,17 +81,17 @@ Suspicious-version detection is **off unless** `--suspicious-version` is set.
 | `ECLIPSE_RISK` | CRITICAL (any high) / WARNING (≥3 medium) | Legitimate nodes have a majority of suspicious inbound peers | 24h |
 | `TOPOLOGY_COLLAPSE` | WARNING | Reachable node count fell below 60% of the previous crawl (partition/crawl failure) | 24h |
 | `NEW_VERSION` | INFO | A version absent last crawl now runs on ≥10 nodes (a release rolling out) | per version, 24h |
-| `PATCH_ADOPTION` | INFO (<10% vulnerable) / WARNING / CRITICAL (≥50%) | `--min-safe-version X.Y.Z` set: share of core (rippled/xrpld) nodes at/above the hotfix version, with top vulnerable builds | on movement + 12h heartbeat while vulnerable nodes remain; at 0 vulnerable the all-clear posts once |
+| `PATCH_ADOPTION` | INFO (<10% vulnerable) / WARNING / CRITICAL (≥50%) | `--min-safe-version X.Y.Z` set: share of core (rippled/xrpld) nodes at/above the hotfix version, with top vulnerable builds | on 5-point movement or escalation; heartbeat 12h while the share needs action, weekly once healthy; at 0 vulnerable the all-clear posts once |
 
 `PATCH_ADOPTION` is the standing version of `scripts/attack-report.py` (the
 manifest-flood incident post) and keeps its classification: base semver of
 `rippled-`/`xrpld-` builds, pre-releases of the fix count as patched, non-core
-clients bucket as "other". Cadence: the hourly crawl always evaluates; the
-dedup key encodes the patched percent, so any percentage-point move posts
-immediately, while an unchanged percent re-posts only every 12h. Once no
-vulnerable nodes remain the card is terminal: the all-clear posts once and the
-heartbeat stops (a regression changes the percent and posts immediately). The
-unit ships
+clients bucket as "other". Cadence: the hourly crawl always evaluates; the dedup
+key bands the patched percent, so a 5-point move (or a severity change) posts
+immediately, while a steady share re-posts every 12h — weekly once the share is
+healthy. Once no vulnerable nodes remain the card is terminal: the all-clear
+posts once and the heartbeat stops (a regression changes the band and posts
+immediately). The unit ships
 `--min-safe-version 3.2.1` (the manifest-flood hotfix); bump the flag when the
 next security release becomes the floor.
 
@@ -79,12 +102,14 @@ current picture. Cold start reports state rather than seeding silently.
 
 | Alert | Severity | Fires when | Dedup |
 |-------|----------|-----------|-------|
-| `AMENDMENT_SUMMARY` | INFO (nothing pending) / WARNING (any in majority) | Every poll: one card naming the amendments in majority with their activation dates, plus anything activated or fallen below majority since the last poll | key fingerprints both sets — a change posts immediately, a steady picture re-posts every 24h |
+| `AMENDMENT_SUMMARY` | INFO (nothing pending) / WARNING (any in majority) | Every poll: one card naming the amendments in majority with their activation dates, plus anything activated or fallen below majority since the last poll | key fingerprints both sets — a change posts immediately; steady state re-posts every 24h with amendments pending, weekly when nothing is |
 
 Replaces the per-amendment `AMENDMENT_MAJORITY` / `AMENDMENT_ENABLED` /
 `AMENDMENT_LOST_MAJORITY` events, for the same reason as `NUNL_SUMMARY`: they were
 edge-triggered, so a settled network emitted nothing and silence could not be told
-apart from a broken poller. The card leads on the **majority** set because those
+apart from a broken poller. A weekly repeat is enough to keep that property now
+that `OBSERVATORY_STALE` reports poller liveness directly. The card leads on the
+**majority** set because those
 are the amendments with a deadline attached; the enabled set is a count, since
 listing all ~93 daily would bury the part that needs action.
 
@@ -94,15 +119,16 @@ Polls the on-ledger NegativeUNL object and diffs the disabled set.
 
 | Alert | Severity | Fires when | Dedup |
 |-------|----------|-----------|-------|
-| `NUNL_SUMMARY` | INFO (empty) / WARNING (any listed) | Every poll: one card stating the whole current Negative UNL, naming validators added or re-enabled since the last poll | key is a fingerprint of the membership — a change posts immediately, an unchanged set re-posts every 24h |
+| `NUNL_SUMMARY` | INFO (empty) / WARNING (any listed) | Every poll: one card stating the whole current Negative UNL, naming validators added or re-enabled since the last poll | key is a fingerprint of the membership — a change posts immediately; an unchanged listing re-posts every 24h, an unchanged *empty* one weekly |
 | `NUNL_CAP` | WARNING ≥20% / CRITICAL ≥25% | The listing approaches or reaches the protocol cap on Negative UNL size | per band |
 
 `NUNL_SUMMARY` replaces the former per-validator `NUNL_DISABLED` / `NUNL_REENABLED`
 events. Those were edge-triggered, so a healthy network produced no output at all
 and silence was indistinguishable from a dead pipeline. The summary is a statement
 of current state instead: it posts on the first poll, re-posts the moment
-membership changes, and otherwise repeats once a day — so "nobody is on the
-Negative UNL" is something you are told rather than something you infer.
+membership changes, and otherwise repeats — daily while validators are listed,
+weekly while none are — so "nobody is on the Negative UNL" is something you are
+told rather than something you infer.
 
 ## crawler `unl-adoption` — XRPL mainnet UNL hotfix adoption (hourly, observatory VM)
 
@@ -114,12 +140,12 @@ carries no version are reported but excluded from the percentage.
 
 | Alert | Severity | Fires when | Dedup |
 |-------|----------|-----------|-------|
-| `UNL_PATCH_ADOPTION` | INFO (<10% vulnerable) / WARNING / CRITICAL (≥50%) | Share of reporting UNL validators at/above the hotfix, naming the vulnerable ones by domain | on movement + 12h heartbeat while vulnerable validators remain; at 0 vulnerable the all-clear posts once |
+| `UNL_PATCH_ADOPTION` | INFO (<10% vulnerable) / WARNING / CRITICAL (≥50%) | Share of reporting UNL validators at/above the hotfix, naming the vulnerable ones by domain | on 5-point movement or escalation; heartbeat 12h while the share needs action, weekly once healthy; at 0 vulnerable the all-clear posts once |
 
-Same cadence as the network-wide `PATCH_ADOPTION`: the dedup key encodes the
-patched percent, so a change posts immediately and an unchanged percent
-re-posts every 12h — until no vulnerable validators remain, at which point the
-100% card posts once and the heartbeat stops. RCs of the fix count as
+Same cadence as the network-wide `PATCH_ADOPTION`: the dedup key bands the
+patched percent, so real movement posts immediately and a steady share re-posts
+every 12h (weekly once healthy) — until no vulnerable validators remain, at which
+point the 100% card posts once and the heartbeat stops. RCs of the fix count as
 vulnerable (the fix lands in the final). Unit ships `--min-safe-version 3.2.1`.
 
 **Why this and not the validations stream:** the overlay binds a build version
@@ -131,7 +157,7 @@ out-of-band, so this consumes that rather than trying to observe it passively.
 The old `monitor --min-version` / `VALIDATOR_VERSION_LAG` decoder is retained but
 inert (validations never carry the field); `unl-adoption` supersedes it.
 
-## notifier watchdog — external vantage (Cloud Run, every 15 min) — planned
+## notifier watchdog — external vantage (Cloud Run, every 15 min)
 
 The one thing the monitors can't self-report: whether they and the stage node
 are alive. Runs in the TS service, posts to the same webhook.
@@ -141,8 +167,18 @@ are alive. Runs in the TS service, posts to the same webhook.
 | `NODE_UNREACHABLE` | CRITICAL | `unl.xrpl.foundation/healthz` or public-WS `server_info` fails 2 windows running |
 | `BAD_SERVER_STATE` | WARNING→CRITICAL | Public-WS `server_state` not in {full, proposing, validating} |
 | `OBSERVATORY_STALE` | CRITICAL | Observatory heartbeat object missing/old, or a monitor unit inactive |
+| `DISK_LOW` | WARNING ≥85% / CRITICAL ≥95% | The observatory VM's root disk is filling. Every monitor state file is written atomically (temp + rename), so a full disk fails all of them while leaving every unit `active` — dedup stops persisting and the periodic monitors re-fire the same cards each poll. Fires once per episode, rearms when the disk drains |
 | `LOGS_STALE` | WARNING | No new logmon JSONL in the log bucket for >3h (log pipeline died) |
 | `LOG_ERRORS` | WARNING/CRITICAL | ERR/FTL count or configured patterns cross threshold in shipped stage-node logs |
+
+`DISK_LOW` exists because of the 2026-08-17 storm: the `monitor` unit's raw
+`--output` validation dump grew unbounded (~10GB/day, never rotated, never read)
+and filled the 19GB root disk. Every unit stayed `active`, so `OBSERVATORY_STALE`
+saw nothing, while alert dedup silently froze and the 15-minute nUNL/amendment
+polls re-posted their summary cards on every tick. Three changes close it: the raw
+dump is now opt-in (`--output` unset in the unit), the heartbeat publishes
+`disk_pct`, and a monitor that cannot persist dedup state suppresses its status
+cards for that run rather than reposting them (fault alerts still go out).
 
 ## Not here (owned elsewhere)
 

@@ -24,6 +24,10 @@ pub const NEW_VERSION_MIN_NODES: usize = 10;
 /// (a new percent, hence a new dedup key) posts immediately; steady state
 /// heartbeats at this interval instead of the default 24h.
 pub const ADOPTION_REALERT_SECS: i64 = 43_200;
+/// Dedup-key granularity for the adoption percent, in percentage points. The key
+/// encodes the patched share, and the hourly crawl's node set churns by a node or
+/// two, so banding is what keeps churn from counting as movement.
+pub const ADOPTION_BAND_PCT: usize = 5;
 /// Vulnerable share ≥ this → PATCH_ADOPTION posts CRITICAL.
 pub const ADOPTION_CRIT_PCT: usize = 50;
 /// Vulnerable share ≥ this (and < critical) → WARNING; below → INFO.
@@ -273,11 +277,20 @@ pub fn core_semver(version: &str) -> Option<(u8, u8, u8)> {
     Some((major, minor, patch.parse().ok()?))
 }
 
+/// Dedup key for an adoption status card: the patched percent rounded down to
+/// an [`ADOPTION_BAND_PCT`] band, plus the severity so an escalation always
+/// mints a new key even if it lands inside the current band.
+pub fn adoption_key(min_s: &str, patched_pct: usize, severity: Severity) -> String {
+    let band = patched_pct / ADOPTION_BAND_PCT * ADOPTION_BAND_PCT;
+    format!("{min_s}@{band}/{}", severity.label())
+}
+
 /// PATCH_ADOPTION — share of core nodes running a build at/above `min` (a
 /// hotfix). Pre-releases of `min` itself count as patched, matching the
 /// incident-time attack-report.py. Always returns an alert (it's a status
 /// card, not a fault signal); the dedup key encodes the patched percent so a
-/// change posts immediately and steady state falls to the heartbeat window.
+/// change of [`ADOPTION_BAND_PCT`] posts immediately and steady state falls to
+/// the heartbeat window.
 /// The bool is true when no vulnerable core nodes remain (and at least one
 /// core node reports) — the caller should then post once and stop the
 /// heartbeat.
@@ -323,7 +336,7 @@ pub fn evaluate_adoption(report: &Report, min: (u8, u8, u8)) -> (RuleAlert, bool
     let alert = RuleAlert {
         severity,
         category: "PATCH_ADOPTION",
-        key: format!("{min_s}@{patched_pct}"),
+        key: adoption_key(&min_s, patched_pct, severity),
         title: format!("Patch adoption: {patched_pct}% of core nodes on >={min_s}"),
         text,
         fields: vec![
@@ -429,7 +442,7 @@ mod tests {
         // 200 patched / 1000 core → 20%, 80% vulnerable → CRITICAL
         assert!(!fully_patched);
         assert_eq!(a.severity, Severity::Critical);
-        assert_eq!(a.key, "3.2.1@20");
+        assert_eq!(a.key, "3.2.1@20/CRITICAL");
         assert!(a.title.contains("20%"));
         assert!(a.text.contains("xrpld-3.2.0"));
         assert_eq!(a.fields[0].1, "200");
@@ -447,13 +460,13 @@ mod tests {
         assert_eq!(done.severity, Severity::Info);
         assert!(!fully_patched); // 50 still vulnerable
                                  // movement changes the dedup key → posts immediately
-        assert_ne!(done.key, "3.2.1@20");
-        assert_eq!(done.key, "3.2.1@95");
+        assert_ne!(done.key, "3.2.1@20/CRITICAL");
+        assert_eq!(done.key, "3.2.1@95/INFO");
 
         // everyone patched → terminal card, heartbeat stops
         r.versions = HashMap::from([("xrpld-3.2.1".into(), 1000)]);
         let (all_clear, fully_patched) = evaluate_adoption(&r, (3, 2, 1));
-        assert_eq!(all_clear.key, "3.2.1@100");
+        assert_eq!(all_clear.key, "3.2.1@100/INFO");
         assert!(fully_patched);
     }
 
@@ -463,7 +476,7 @@ mod tests {
         r.versions = HashMap::from([("Hubster/1.0.0".into(), 10)]);
         let (a, fully_patched) = evaluate_adoption(&r, (3, 2, 1));
         assert_eq!(a.severity, Severity::Info);
-        assert_eq!(a.key, "3.2.1@0");
+        assert_eq!(a.key, "3.2.1@0/INFO");
         assert!(!fully_patched); // zero core nodes is no evidence of patching
     }
 

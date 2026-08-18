@@ -49,8 +49,9 @@ fn linked_name(names: &HashMap<String, String>, hex_key: &str) -> String {
     }
 }
 
-/// An unchanged Negative UNL re-posts this often, so a quiet network still
-/// produces a periodic "nobody is listed" card instead of ambiguous silence.
+/// Re-post window for an unchanged Negative UNL that lists validators. An empty
+/// listing needs no such cadence and falls back to the healthy weekly floor
+/// (`HEALTHY_REALERT_SECS`) via `AlertSink::send_status`.
 pub const SUMMARY_HEARTBEAT_SECS: i64 = 24 * 60 * 60;
 
 /// Well-known ledger index of the NegativeUNL singleton (sha512half(uint16('N'))).
@@ -319,9 +320,10 @@ pub async fn run(
         let now = chrono::Utc::now().timestamp();
         for a in &alerts {
             // The summary's key changes whenever membership does, so a change
-            // posts at once; an unchanged roster re-posts on the heartbeat.
+            // posts at once; an unchanged roster re-posts on the heartbeat —
+            // weekly while nobody is listed, daily while someone is.
             if a.category == "NUNL_SUMMARY" {
-                sink.send_every(
+                sink.send_status(
                     SUMMARY_HEARTBEAT_SECS,
                     a.severity,
                     a.category,

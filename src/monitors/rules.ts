@@ -21,6 +21,7 @@ export interface MonitorsState {
   observatoryAlerted: boolean
   logsStaleAlerted: boolean
   nodeBadStateAlerted: boolean
+  diskLowAlerted: boolean
 }
 
 export const DEFAULT_MONITORS_STATE: MonitorsState = {
@@ -28,10 +29,15 @@ export const DEFAULT_MONITORS_STATE: MonitorsState = {
   observatoryAlerted: false,
   logsStaleAlerted: false,
   nodeBadStateAlerted: false,
+  diskLowAlerted: false,
 }
 
 /** Heartbeat older than this (or any unit down) → OBSERVATORY_STALE. */
 export const HEARTBEAT_MAX_AGE_MS = 30 * 60 * 1000
+/** Root-disk use at/above this → DISK_LOW (WARNING). */
+export const DISK_WARN_PCT = 85
+/** Root-disk use at/above this → DISK_LOW (CRITICAL): state writes are at risk. */
+export const DISK_CRIT_PCT = 95
 /** No new shipped log object in this long → LOGS_STALE. */
 export const LOGS_MAX_AGE_MS = 3 * 60 * 60 * 1000
 /** NODE_UNREACHABLE needs this many consecutive failed windows. */
@@ -44,6 +50,8 @@ const HEALTHY_STATES = new Set(['full', 'proposing', 'validating'])
 export const HeartbeatSchema = z.object({
   ts: z.string(),
   host: z.string().optional(),
+  /** Root-disk use percent. Optional: heartbeats predating it still validate. */
+  disk_pct: z.number().optional(),
   units: z.record(z.string(), z.string()),
 })
 export type Heartbeat = z.infer<typeof HeartbeatSchema>
@@ -92,6 +100,26 @@ export function evaluateObservatory(
     }
   } else {
     next.observatoryAlerted = false
+  }
+
+  // A full disk leaves every unit "active" while silently failing the atomic
+  // state writes the monitors dedup on, so it needs its own signal.
+  const diskPct = HeartbeatSchema.safeParse(heartbeatInput).data?.disk_pct
+  if (diskPct !== undefined && diskPct >= DISK_WARN_PCT) {
+    if (!next.diskLowAlerted) {
+      next.diskLowAlerted = true
+      alerts.push({
+        severity: diskPct >= DISK_CRIT_PCT ? 'CRITICAL' : 'WARNING',
+        category: 'DISK_LOW',
+        title: `Observatory root disk ${diskPct}% full`,
+        text:
+          `The observatory VM's root disk is ${diskPct}% full. Monitor state files are ` +
+          `written atomically, so once it fills, alert dedup stops persisting and the ` +
+          `periodic monitors re-fire the same cards every poll.`,
+      })
+    }
+  } else if (diskPct !== undefined) {
+    next.diskLowAlerted = false
   }
   return { alerts, state: next }
 }

@@ -90,9 +90,11 @@ enum Command {
         #[arg(long, default_value = "crawl-state.json")]
         state_file: String,
 
-        /// Output JSONL file for validation logs
-        #[arg(short, long, default_value = "validations.jsonl")]
-        output: String,
+        /// Append every decoded validation to this JSONL file. Unset by default:
+        /// mainnet writes ~10GB/day here and the file is never rotated, so it is
+        /// a forensic opt-in.
+        #[arg(short, long)]
+        output: Option<String>,
 
         /// UNL file with expected validator master keys (one nH... key per line)
         #[arg(long)]
@@ -289,7 +291,7 @@ async fn main() -> Result<()> {
             monitor::run(
                 endpoints,
                 &state_file,
-                &output,
+                output.as_deref(),
                 unl_file.as_deref(),
                 min_validators,
                 &alerts,

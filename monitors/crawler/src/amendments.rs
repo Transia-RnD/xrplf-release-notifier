@@ -31,8 +31,9 @@ impl AmendmentsState {
     }
 }
 
-/// An unchanged amendment picture re-posts this often, so a quiet network still
-/// produces a periodic "nothing pending" card instead of ambiguous silence.
+/// Re-post window for an unchanged picture with amendments pending activation —
+/// those carry a deadline. "Nothing pending" needs no such cadence and falls back
+/// to the healthy weekly floor (`HEALTHY_REALERT_SECS`) via `send_status`.
 pub const SUMMARY_HEARTBEAT_SECS: i64 = 24 * 60 * 60;
 
 pub struct AmendmentAlert {
@@ -260,8 +261,9 @@ pub async fn run(
         let now = chrono::Utc::now().timestamp();
         for a in &alerts {
             // The key fingerprints both sets, so a change posts at once; a
-            // steady picture re-posts on the heartbeat.
-            sink.send_every(
+            // steady picture re-posts on the heartbeat — weekly while nothing is
+            // pending, daily while amendments are scheduled to activate.
+            sink.send_status(
                 SUMMARY_HEARTBEAT_SECS,
                 a.severity,
                 a.category,
