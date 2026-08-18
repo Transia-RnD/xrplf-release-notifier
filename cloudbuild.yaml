@@ -14,7 +14,7 @@ steps:
       - '--platform=managed'
       - '--allow-unauthenticated'
       - '--service-account=xrplf-release-notifier@$PROJECT_ID.iam.gserviceaccount.com'
-      - '--set-env-vars=GCP_PROJECT_ID=$PROJECT_ID,APP_SECRET_VERSION=latest,GCS_BUCKET=xrplf-release-notifier'
+      - '--set-env-vars=GCP_PROJECT_ID=$PROJECT_ID,APP_SECRET_VERSION=latest,GCS_BUCKET=xrplf-release-notifier,PAGER_ENABLED=true,TWILIO_CHANNEL=whatsapp'
       - '--memory=256Mi'
       - '--max-instances=1'
       - '--min-instances=0'
