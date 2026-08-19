@@ -285,6 +285,24 @@ pub fn adoption_key(min_s: &str, patched_pct: usize, severity: Severity) -> Stri
     format!("{min_s}@{band}/{}", severity.label())
 }
 
+/// The band out of an adoption key, tolerating keys written before the severity
+/// suffix existed (`3.2.1@100`).
+pub fn key_band(key: &str) -> Option<usize> {
+    key.rsplit_once('@')?
+        .1
+        .split('/')
+        .next()?
+        .parse::<usize>()
+        .ok()
+}
+
+/// Whether a 100%-patched card is worth posting, given the most recent key posted
+/// for its category. The all-clear closes out a vulnerable share we reported, so
+/// it is news only after such a report — never on a fresh state file, never twice.
+pub fn allclear_is_news(last_key: Option<&str>) -> bool {
+    matches!(last_key.and_then(key_band), Some(b) if b < 100)
+}
+
 /// PATCH_ADOPTION — share of core nodes running a build at/above `min` (a
 /// hotfix). Pre-releases of `min` itself count as patched, matching the
 /// incident-time attack-report.py. Always returns an alert (it's a status
@@ -468,6 +486,27 @@ mod tests {
         let (all_clear, fully_patched) = evaluate_adoption(&r, (3, 2, 1));
         assert_eq!(all_clear.key, "3.2.1@100/INFO");
         assert!(fully_patched);
+    }
+
+    #[test]
+    fn allclear_posts_only_as_a_transition_off_a_vulnerable_share() {
+        // closing out a share we reported as vulnerable is news
+        assert!(allclear_is_news(Some("3.2.1@75/WARNING")));
+        assert!(allclear_is_news(Some("3.2.1@95/INFO")));
+        // already announced → silent, in either key format
+        assert!(!allclear_is_news(Some("3.2.1@100/INFO")));
+        assert!(!allclear_is_news(Some("3.2.1@100")));
+        // nothing ever reported → nothing to close out
+        assert!(!allclear_is_news(None));
+        assert!(!allclear_is_news(Some("garbage")));
+    }
+
+    #[test]
+    fn key_band_reads_both_key_formats() {
+        assert_eq!(key_band("3.2.1@75/WARNING"), Some(75));
+        assert_eq!(key_band("3.2.1@100"), Some(100));
+        assert_eq!(key_band("3.2.1@0/INFO"), Some(0));
+        assert_eq!(key_band("nonsense"), None);
     }
 
     #[test]

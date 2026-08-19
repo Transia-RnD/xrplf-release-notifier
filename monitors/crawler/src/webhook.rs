@@ -72,6 +72,18 @@ impl AlertSink {
         self.enabled
     }
 
+    /// The most recently posted key for `category`, without its `category:`
+    /// prefix. Lets a caller ask what it last said before saying it again.
+    pub fn last_key_for(&self, category: &str) -> Option<&str> {
+        let prefix = format!("{category}:");
+        self.dedup
+            .last_sent
+            .iter()
+            .filter_map(|(k, ts)| k.strip_prefix(&prefix).map(|rest| (rest, ts)))
+            .max_by_key(|(_, ts)| **ts)
+            .map(|(rest, _)| rest)
+    }
+
     /// Map the crawler's string severity to the shared enum.
     pub fn severity_of(s: &str) -> Severity {
         match s {
@@ -246,6 +258,21 @@ mod tests {
         // a fault alert is never suppressed — it dedups on its own key
         s.send(Severity::Critical, "FORK", "k", "t", "x", vec![], 0);
         assert_eq!(s.dedup.last_sent.get("FORK:k"), Some(&0));
+    }
+
+    #[test]
+    fn last_key_for_returns_the_most_recent_key_in_a_category() {
+        let mut s = sink();
+        let send = |s: &mut AlertSink, key: &str, now: i64| {
+            s.send_every(1, Severity::Info, "ADOPT", key, "t", "x", vec![], now)
+        };
+        send(&mut s, "3.2.1@75/WARNING", 100);
+        send(&mut s, "3.2.1@100/INFO", 200);
+        // a category that merely starts with "ADOPT" must not be matched
+        s.send_every(1, Severity::Info, "ADOPTX", "newer", "t", "x", vec![], 300);
+        assert_eq!(s.last_key_for("ADOPT"), Some("3.2.1@100/INFO"));
+        assert_eq!(s.last_key_for("ADOPTX"), Some("newer"));
+        assert_eq!(s.last_key_for("MISSING"), None);
     }
 
     #[test]

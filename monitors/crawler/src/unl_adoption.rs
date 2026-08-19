@@ -162,7 +162,9 @@ pub async fn run(
     let card = evaluate(&validators, min);
 
     let mut sink = AlertSink::new(webhook, dry_run, webhook_state, "xrpl-crawler/unl-adoption");
-    if sink.enabled() {
+    let all_clear_is_stale = card.fully_patched
+        && !crate::report::allclear_is_news(sink.last_key_for("UNL_PATCH_ADOPTION"));
+    if sink.enabled() && !all_clear_is_stale {
         let now = chrono::Utc::now().timestamp();
         // Fully patched → post this key once, no heartbeat.
         let realert = if card.fully_patched {

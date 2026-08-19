@@ -278,8 +278,8 @@ pub async fn run(
             }
             // Adoption status card: every crawl evaluates; the banded-percent
             // dedup key posts real movement immediately, steady state
-            // heartbeats (weekly once the picture is healthy). Fully patched →
-            // the key posts once and the heartbeat stops.
+            // heartbeats (weekly once the picture is healthy). The all-clear
+            // posts only as a transition off a vulnerable share.
             if let Some(min_s) = min_safe_version {
                 match crate::version::parse_min(min_s) {
                     Some(min) => {
@@ -289,16 +289,21 @@ pub async fn run(
                         } else {
                             report::ADOPTION_REALERT_SECS
                         };
-                        sink.send_status(
-                            realert,
-                            a.severity,
-                            a.category,
-                            &a.key,
-                            &a.title,
-                            &a.text,
-                            a.fields.clone(),
-                            now,
-                        );
+                        if fully_patched && !report::allclear_is_news(sink.last_key_for(a.category))
+                        {
+                            eprintln!("crawler: {} all-clear already posted — skipped", a.category);
+                        } else {
+                            sink.send_status(
+                                realert,
+                                a.severity,
+                                a.category,
+                                &a.key,
+                                &a.title,
+                                &a.text,
+                                a.fields.clone(),
+                                now,
+                            );
+                        }
                         evaluated += 1;
                     }
                     None => eprintln!(

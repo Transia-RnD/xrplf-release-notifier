@@ -20,6 +20,9 @@ poller. Its cadence therefore depends on whether the picture needs action:
   standing in for.
 - **movement always posts immediately**, at any severity, because the dedup key
   encodes the picture itself.
+- **an all-clear is only news after bad news.** A 100%-patched card posts only when
+  the last thing posted for that category was a vulnerable share — never on a fresh
+  state file, never twice, and never because the key format changed.
 - **dedup unwritable → status cards are dropped** for that run. A status card that
   can't be recorded posts again on the very next tick, so one missed card beats a
   flooded channel; fault alerts are never suppressed this way. See `DISK_LOW`.
@@ -81,7 +84,7 @@ Suspicious-version detection is **off unless** `--suspicious-version` is set.
 | `ECLIPSE_RISK` | CRITICAL (any high) / WARNING (≥3 medium) | Legitimate nodes have a majority of suspicious inbound peers | 24h |
 | `TOPOLOGY_COLLAPSE` | WARNING | Reachable node count fell below 60% of the previous crawl (partition/crawl failure) | 24h |
 | `NEW_VERSION` | INFO | A version absent last crawl now runs on ≥10 nodes (a release rolling out) | per version, 24h |
-| `PATCH_ADOPTION` | INFO (<10% vulnerable) / WARNING / CRITICAL (≥50%) | `--min-safe-version X.Y.Z` set: share of core (rippled/xrpld) nodes at/above the hotfix version, with top vulnerable builds | on 5-point movement or escalation; heartbeat 12h while the share needs action, weekly once healthy; at 0 vulnerable the all-clear posts once |
+| `PATCH_ADOPTION` | INFO (<10% vulnerable) / WARNING / CRITICAL (≥50%) | `--min-safe-version X.Y.Z` set: share of core (rippled/xrpld) nodes at/above the hotfix version, with top vulnerable builds | on 5-point movement or escalation; heartbeat 12h while the share needs action, weekly once healthy; the all-clear posts once, and only as a transition off a share we reported vulnerable |
 
 `PATCH_ADOPTION` is the standing version of `scripts/attack-report.py` (the
 manifest-flood incident post) and keeps its classification: base semver of
@@ -140,7 +143,7 @@ carries no version are reported but excluded from the percentage.
 
 | Alert | Severity | Fires when | Dedup |
 |-------|----------|-----------|-------|
-| `UNL_PATCH_ADOPTION` | INFO (<10% vulnerable) / WARNING / CRITICAL (≥50%) | Share of reporting UNL validators at/above the hotfix, naming the vulnerable ones by domain | on 5-point movement or escalation; heartbeat 12h while the share needs action, weekly once healthy; at 0 vulnerable the all-clear posts once |
+| `UNL_PATCH_ADOPTION` | INFO (<10% vulnerable) / WARNING / CRITICAL (≥50%) | Share of reporting UNL validators at/above the hotfix, naming the vulnerable ones by domain | on 5-point movement or escalation; heartbeat 12h while the share needs action, weekly once healthy; the all-clear posts once, and only as a transition off a share we reported vulnerable |
 
 Same cadence as the network-wide `PATCH_ADOPTION`: the dedup key bands the
 patched percent, so real movement posts immediately and a steady share re-posts
